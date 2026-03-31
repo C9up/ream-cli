@@ -5,9 +5,20 @@ use std::path::Path;
 
 /// Configure a package — modify reamrc.ts, .env, generate config files.
 pub fn configure(package: &str, force: bool) -> Result<(), String> {
-    // Validate package name
-    let valid = package.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '@' || c == '/' || c == '.');
-    if !valid {
+    // Validate package name — must match @scope/name or plain name pattern
+    let is_valid_npm_name = |s: &str| -> bool {
+        // @scope/name or plain name — no .. or path separators beyond single /
+        if s.contains("..") { return false; }
+        if s.starts_with('@') {
+            let parts: Vec<&str> = s.splitn(2, '/').collect();
+            parts.len() == 2
+                && parts[0].len() > 1
+                && parts[1].chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+        } else {
+            s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        }
+    };
+    if !is_valid_npm_name(package) {
         return Err(format!("Invalid package name: {}", package));
     }
 
@@ -163,11 +174,11 @@ fn add_env_vars(vars: &[(&str, &str)]) -> Result<(), String> {
 fn write_config_file(path: &str, content: &str, force: bool) -> Result<(), String> {
     let full = Path::new(path);
 
-    // Path traversal guard
-    let abs = std::fs::canonicalize(".").unwrap_or_default().join(path);
-    let cwd = std::fs::canonicalize(".").unwrap_or_default();
-    if !abs.starts_with(&cwd) {
-        return Err(format!("Refusing to write outside project root: {}", path));
+    // Path traversal guard — reject any parent directory components
+    for component in Path::new(path).components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(format!("Refusing to write outside project root: {}", path));
+        }
     }
 
     if full.exists() && !force {

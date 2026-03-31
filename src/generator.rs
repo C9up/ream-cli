@@ -1,21 +1,45 @@
 //! Generator — code generation from templates (pure Rust, no Node.js).
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, Component};
 
-/// Generate a file based on type, module, and name.
-pub fn make(kind: &str, module: &str, name: &str) -> Result<(), String> {
-    let (path, content) = match kind {
-        "service" => generate_service(module, name),
-        "entity" => generate_entity(module, name),
-        "controller" => generate_controller(module, name),
-        "validator" => generate_validator(module, name),
-        "provider" => generate_provider(name),
-        "migration" => generate_migration(name),
-        _ => return Err(format!("Unknown generator type: {}", kind)),
-    };
+/// Max input length for names.
+const MAX_NAME_LEN: usize = 128;
 
-    let full_path = Path::new(&path);
+/// Validate a name component — alphanumeric, hyphens, underscores only.
+fn validate_name(s: &str, label: &str) -> Result<(), String> {
+    if s.is_empty() {
+        return Err(format!("{} must not be empty", label));
+    }
+    if s.len() > MAX_NAME_LEN {
+        return Err(format!("{} exceeds maximum length of {} characters", label, MAX_NAME_LEN));
+    }
+    if !s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return Err(format!("{} '{}' contains invalid characters (alphanumeric, hyphens, underscores only)", label, s));
+    }
+    Ok(())
+}
+
+/// Check path doesn't escape project root.
+fn validate_path(path: &str) -> Result<(), String> {
+    for component in Path::new(path).components() {
+        if matches!(component, Component::ParentDir) {
+            return Err(format!("Refusing to write outside project root: {}", path));
+        }
+    }
+    Ok(())
+}
+
+/// Safe file write — validates path, checks existence, creates dirs.
+fn safe_write(path: &str, content: &str) -> Result<(), String> {
+    validate_path(path)?;
+
+    let full_path = Path::new(path);
+
+    if full_path.exists() {
+        return Err(format!("File already exists: {} (use a different name)", path));
+    }
+
     if let Some(parent) = full_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
     }
@@ -25,16 +49,47 @@ pub fn make(kind: &str, module: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Generate a file based on type, module, and name.
+pub fn make(kind: &str, module: &str, name: &str) -> Result<(), String> {
+    // Input validation
+    validate_name(name, "name")?;
+    if !module.is_empty() {
+        validate_name(module, "module")?;
+    }
+
+    let (path, content) = match kind {
+        "service" => generate_service(module, name),
+        "entity" => generate_entity(module, name),
+        "controller" => generate_controller(module, name),
+        "validator" => generate_validator(module, name),
+        "provider" => generate_provider(name),
+        "migration" => generate_migration(name)?,
+        _ => return Err(format!("Unknown generator type: {}", kind)),
+    };
+
+    safe_write(&path, &content)
+}
+
 fn ensure_suffix(name: &str, suffix: &str) -> String {
     if name.ends_with(suffix) { name.to_string() } else { format!("{}{}", name, suffix) }
 }
 
+/// Convert PascalCase to snake_case with correct acronym handling.
+/// HTTPClient → http_client, OrderItem → order_item
 fn to_snake_case(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
     let mut result = String::new();
-    for (i, c) in name.chars().enumerate() {
+    for (i, &c) in chars.iter().enumerate() {
         if c.is_uppercase() {
-            if i > 0 { result.push('_'); }
-            result.push(c.to_lowercase().next().unwrap());
+            let prev_lower = i > 0 && chars[i - 1].is_lowercase();
+            let next_lower = i + 1 < chars.len() && chars[i + 1].is_lowercase();
+            let preceded_by_upper = i > 0 && chars[i - 1].is_uppercase();
+            if i > 0 && (prev_lower || (next_lower && preceded_by_upper)) {
+                result.push('_');
+            }
+            for lc in c.to_lowercase() {
+                result.push(lc);
+            }
         } else {
             result.push(c);
         }
@@ -169,8 +224,8 @@ export default class {} extends Provider {{
     (path, content)
 }
 
-fn generate_migration(name: &str) -> (String, String) {
-    let timestamp = chrono_timestamp();
+fn generate_migration(name: &str) -> Result<(String, String), String> {
+    let timestamp = chrono_timestamp()?;
     let snake = to_snake_case(name);
     let path = format!("database/migrations/{}_{}.ts", timestamp, snake);
     let content = r#"export async function up() {
@@ -181,24 +236,24 @@ export async function down() {
   // TODO: implement rollback
 }
 "#.to_string();
-    (path, content)
+    Ok((path, content))
 }
 
-fn chrono_timestamp() -> String {
+fn chrono_timestamp() -> Result<String, String> {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-    // Simple timestamp: YYYYMMDDHHmmss
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("System clock error: {}", e))?
+        .as_secs();
     let s = secs;
     let sec = s % 60; let s = s / 60;
     let min = s % 60; let s = s / 60;
     let hour = s % 24; let days = s / 24;
-    // Approximate date from days since epoch
     let (year, month, day) = days_to_date(days);
-    format!("{:04}{:02}{:02}{:02}{:02}{:02}", year, month, day, hour, min, sec)
+    Ok(format!("{:04}{:02}{:02}{:02}{:02}{:02}", year, month, day, hour, min, sec))
 }
 
 fn days_to_date(days: u64) -> (u64, u64, u64) {
-    // Simplified date calculation from days since 1970-01-01
     let mut y = 1970u64;
     let mut remaining = days;
     loop {

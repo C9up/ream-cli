@@ -1,0 +1,133 @@
+name: Build & Publish CLI
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: ream
+            npm-pkg: ream-cli-linux-x64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary: ream
+            npm-pkg: ream-cli-darwin-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: ream
+            npm-pkg: ream-cli-darwin-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: ream.exe
+            npm-pkg: ream-cli-win32-x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target ${{ matrix.target }} -p ream-cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.npm-pkg }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Create platform-specific packages
+      - name: Package binaries
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          for platform in linux-x64 darwin-x64 darwin-arm64 win32-x64; do
+            PKG="ream-cli-${platform}"
+            mkdir -p "npm/${PKG}"
+            
+            if [ "$platform" = "win32-x64" ]; then
+              BINARY="ream.exe"
+            else
+              BINARY="ream"
+            fi
+            
+            cp "artifacts/${PKG}/${BINARY}" "npm/${PKG}/"
+            chmod +x "npm/${PKG}/${BINARY}" 2>/dev/null || true
+            
+            cat > "npm/${PKG}/package.json" << PKGEOF
+          {
+            "name": "@c9up/${PKG}",
+            "version": "${VERSION}",
+            "os": ["${platform%%-*}"],
+            "cpu": ["${platform##*-}"],
+            "bin": { "ream": "./${BINARY}" }
+          }
+          PKGEOF
+            
+            cd "npm/${PKG}" && npm publish --access public && cd ../..
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Publish the main wrapper package
+      - name: Publish @c9up/ream-cli
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          mkdir -p npm/ream-cli
+          cat > npm/ream-cli/package.json << PKGEOF
+          {
+            "name": "@c9up/ream-cli",
+            "version": "${VERSION}",
+            "description": "Ream CLI — Rust-native command-line tool",
+            "bin": { "ream": "bin/ream" },
+            "optionalDependencies": {
+              "@c9up/ream-cli-linux-x64": "${VERSION}",
+              "@c9up/ream-cli-darwin-x64": "${VERSION}",
+              "@c9up/ream-cli-darwin-arm64": "${VERSION}",
+              "@c9up/ream-cli-win32-x64": "${VERSION}"
+            }
+          }
+          PKGEOF
+          
+          mkdir -p npm/ream-cli/bin
+          cat > npm/ream-cli/bin/ream << 'BINEOF'
+          #!/usr/bin/env node
+          const { execFileSync } = require('child_process');
+          const path = require('path');
+          const os = require('os');
+          const platformMap = {
+            'linux-x64': '@c9up/ream-cli-linux-x64',
+            'darwin-x64': '@c9up/ream-cli-darwin-x64',
+            'darwin-arm64': '@c9up/ream-cli-darwin-arm64',
+            'win32-x64': '@c9up/ream-cli-win32-x64',
+          };
+          const pkg = platformMap[`${os.platform()}-${os.arch()}`];
+          if (!pkg) { console.error(`Unsupported platform: ${os.platform()}-${os.arch()}`); process.exit(1); }
+          const bin = os.platform() === 'win32' ? 'ream.exe' : 'ream';
+          const binPath = path.join(require.resolve(`${pkg}/package.json`), '..', bin);
+          try { execFileSync(binPath, process.argv.slice(2), { stdio: 'inherit' }); }
+          catch (e) { process.exit(e.status || 1); }
+          BINEOF
+          chmod +x npm/ream-cli/bin/ream
+          
+          cd npm/ream-cli && npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

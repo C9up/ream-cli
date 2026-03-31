@@ -1,6 +1,6 @@
 [package]
 name = "ream-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 description = "Ream CLI — Rust-native command-line tool for the Ream framework"
@@ -13,9 +13,6 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 dialoguer = "0.11"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-colored = "2"
 
 [profile.release]
 opt-level = "z"

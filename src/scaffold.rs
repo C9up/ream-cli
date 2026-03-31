@@ -11,8 +11,9 @@ pub fn run(name: &str) -> Result<(), String> {
         return Err("Project name must be alphanumeric with hyphens/underscores only".to_string());
     }
 
-    if Path::new(name).exists() {
-        return Err(format!("Directory '{}' already exists", name));
+    let target = Path::new(name);
+    if target.exists() || target.is_symlink() {
+        return Err(format!("'{}' already exists", name));
     }
 
     println!("\n  \x1b[1mCreating Ream project: {}\x1b[0m\n", name);
