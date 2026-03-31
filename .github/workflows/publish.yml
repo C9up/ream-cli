@@ -82,6 +82,7 @@ jobs:
           }
           PKGEOF
             
+            cp README.md "npm/${PKG}/README.md"
             cd "npm/${PKG}" && npm publish --access public && cd ../..
           done
         env:
@@ -127,7 +128,8 @@ jobs:
           catch (e) { process.exit(e.status || 1); }
           BINEOF
           chmod +x npm/ream-cli/bin/ream
-          
+          cp README.md npm/ream-cli/README.md
+
           cd npm/ream-cli && npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,6 +1,6 @@
 [package]
 name = "ream-cli"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT"
 description = "Ream CLI — Rust-native command-line tool for the Ream framework"
