@@ -83,6 +83,12 @@ pub fn run(name: &str) -> Result<(), String> {
 }
 
 fn write_file(root: &Path, path: &str, content: &str) -> Result<(), String> {
+    // Path traversal guard
+    for component in Path::new(path).components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(format!("Refusing to write outside project root: {}", path));
+        }
+    }
     let full = root.join(path);
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
