@@ -76,6 +76,19 @@ fn ensure_suffix(name: &str, suffix: &str) -> String {
 
 /// Convert PascalCase to snake_case with correct acronym handling.
 /// HTTPClient → http_client, OrderItem → order_item
+fn to_pascal_case(name: &str) -> String {
+    name.split(|c: char| c == '_' || c == '-' || c == ' ')
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let mut chars = s.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+            }
+        })
+        .collect()
+}
+
 fn to_snake_case(name: &str) -> String {
     let chars: Vec<char> = name.chars().collect();
     let mut result = String::new();
@@ -228,14 +241,22 @@ fn generate_migration(name: &str) -> Result<(String, String), String> {
     let timestamp = chrono_timestamp()?;
     let snake = to_snake_case(name);
     let path = format!("database/migrations/{}_{}.ts", timestamp, snake);
-    let content = r#"export async function up() {
-  // TODO: implement migration
-}
+    let class_name = to_pascal_case(name);
+    let content = format!(r#"import {{ Migration }} from '@c9up/atlas'
 
-export async function down() {
-  // TODO: implement rollback
-}
-"#.to_string();
+export default class {class_name} extends Migration {{
+  up() {{
+    this.schema.createTable('TABLE_NAME', (t) => {{
+      t.uuid('id').primary()
+      t.timestamps()
+    }})
+  }}
+
+  down() {{
+    this.schema.dropTable('TABLE_NAME')
+  }}
+}}
+"#);
     Ok((path, content))
 }
 

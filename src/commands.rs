@@ -24,6 +24,75 @@ pub fn spawn_node(cmd: &str, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+/// Run a migration command via Node.js inline script.
+/// Boots the app (providers + config), then runs the migration action.
+pub fn run_migration(action: &str) -> Result<(), String> {
+    if !std::path::Path::new("package.json").exists() {
+        return Err("Not in a Ream project (no package.json found)".to_string());
+    }
+
+    let script = match action {
+        "migrate" => r#"
+            import 'reflect-metadata';
+            import { Ignitor } from '@c9up/ream';
+            const rc = (await import('./reamrc.ts')).default;
+            const app = await new Ignitor(new URL('./', import.meta.url))
+                .useRcFile(rc).setEnvironment('console').start();
+            console.log('Migrations applied.');
+            await app.stop();
+        "#,
+        "migrate:rollback" => r#"
+            import 'reflect-metadata';
+            import { Ignitor } from '@c9up/ream';
+            const rc = (await import('./reamrc.ts')).default;
+            const app = await new Ignitor(new URL('./', import.meta.url))
+                .useRcFile(rc).setEnvironment('console').start();
+            const db = app.getApp().container.resolve('db');
+            const last = db.prepare("SELECT MAX(batch) as b FROM _migrations WHERE batch IS NOT NULL").get();
+            if (last?.b) {
+                const rows = db.prepare("SELECT name FROM _migrations WHERE batch = ?").all(last.b);
+                for (const row of rows.reverse()) {
+                    const mod = await import('./database/migrations/' + row.name + '.ts');
+                    const m = new mod.default('sqlite');
+                    for (const sql of await m.getDownSQL()) db.exec(sql);
+                    db.prepare("DELETE FROM _migrations WHERE name = ?").run(row.name);
+                    console.log('  rolled back:', row.name);
+                }
+            } else {
+                console.log('  Nothing to rollback.');
+            }
+            await app.stop();
+        "#,
+        "migrate:status" => r#"
+            import 'reflect-metadata';
+            import { Ignitor } from '@c9up/ream';
+            const rc = (await import('./reamrc.ts')).default;
+            const app = await new Ignitor(new URL('./', import.meta.url))
+                .useRcFile(rc).setEnvironment('console').start();
+            const db = app.getApp().container.resolve('db');
+            const rows = db.prepare("SELECT name, executed_at FROM _migrations ORDER BY name").all();
+            if (rows.length === 0) { console.log('  No migrations found.'); }
+            else { for (const r of rows) console.log('  applied:', r.name, '(' + r.executed_at + ')'); }
+            await app.stop();
+        "#,
+        _ => return Err(format!("Unknown migration action: {}", action)),
+    };
+
+    let status = Command::new("node")
+        .args(&["--import", "@swc-node/register/esm-register", "--input-type=module", "-e", script])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .map_err(|e| format!("Failed to run migration: {}", e))?;
+
+    if !status.success() {
+        return Err(format!("Migration failed with code {}", status.code().unwrap_or(-1)));
+    }
+
+    Ok(())
+}
+
 /// Show version and environment info.
 pub fn info() -> Result<(), String> {
     println!("ream {}", env!("CARGO_PKG_VERSION"));

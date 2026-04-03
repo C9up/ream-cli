@@ -77,6 +77,18 @@ enum Commands {
         name: String,
     },
 
+    /// Run pending database migrations
+    #[command(name = "migrate")]
+    Migrate,
+
+    /// Rollback the last batch of migrations
+    #[command(name = "migrate:rollback")]
+    MigrateRollback,
+
+    /// Show migration status
+    #[command(name = "migrate:status")]
+    MigrateStatus,
+
     /// Configure a package (auto-setup provider, config, env)
     Configure {
         /// Package name (e.g., @c9up/atlas)
@@ -107,6 +119,9 @@ fn main() {
         Commands::MakeValidator { module, name } => generator::make("validator", &module, &name),
         Commands::MakeProvider { name } => generator::make("provider", "", &name),
         Commands::MakeMigration { name } => generator::make("migration", "", &name),
+        Commands::Migrate => commands::run_migration("migrate"),
+        Commands::MigrateRollback => commands::run_migration("migrate:rollback"),
+        Commands::MigrateStatus => commands::run_migration("migrate:status"),
         Commands::Configure { package, force } => codemods::configure(&package, force),
         Commands::Doctor => doctor::run(),
         Commands::Info => commands::info(),
