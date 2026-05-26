@@ -1,0 +1,246 @@
+name: Build & Publish CLI
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_overwrite:
+        description: 'Type YES to override the drift gate (force-publish even if registry version >= Cargo.toml version). Use only for rollback scenarios.'
+        required: false
+        default: 'no'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-ream-cli
+  cancel-in-progress: false
+
+jobs:
+  gates:
+    name: Publish gates (tag + drift)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Tag-vs-Cargo.toml gate
+        id: tag
+        run: |
+          tag=$(git tag --points-at HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
+          if [ -z "$tag" ]; then
+            echo "::error::HEAD has no v<MAJOR>.<MINOR>.<PATCH>-shaped tag — refuse to publish from an untagged commit"
+            exit 1
+          fi
+          cargo_v=$(sed -n '/^\[package\]/,/^\[/{s/^version = "\([^"]*\)".*/\1/p;}' Cargo.toml | head -1)
+          if [ -z "$cargo_v" ]; then
+            echo "::error::Could not parse [package].version from Cargo.toml"
+            exit 1
+          fi
+          cargo_tag="v${cargo_v}"
+          if [ "$tag" != "$cargo_tag" ]; then
+            echo "::error::Tag $tag does not match Cargo.toml $cargo_tag — refuse to publish from a drifted tag"
+            exit 1
+          fi
+          echo "Tag gate passed: $tag == $cargo_tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Drift fail-closed gate
+        env:
+          CONFIRM_OVERWRITE: ${{ inputs.confirm_overwrite }}
+        run: |
+          local_v=$(sed -n '/^\[package\]/,/^\[/{s/^version = "\([^"]*\)".*/\1/p;}' Cargo.toml | head -1)
+          if [ -z "$local_v" ]; then
+            echo "::error::Could not parse [package].version from Cargo.toml"
+            exit 1
+          fi
+          npm_err=$(mktemp)
+          npm_v=$(npm view --fetch-timeout=30000 @c9up/ream-cli version 2>"$npm_err")
+          status=$?
+          err=$(cat "$npm_err"); rm -f "$npm_err"
+          if [ "$status" -ne 0 ]; then
+            if echo "$err" | grep -qE 'E404|404 Not Found'; then
+              npm_v=""
+              echo "Drift gate: package not yet on registry — first-publish path"
+            else
+              echo "::error::Cannot reach npm registry — refuse to publish without a verified registry version. Output: $err"
+              exit 1
+            fi
+          fi
+          if [ -z "$npm_v" ]; then
+            echo "Drift gate passed: first publish of @c9up/ream-cli (local $local_v)"
+            exit 0
+          fi
+          highest=$(printf '%s\n%s\n' "$npm_v" "$local_v" | sort -V | tail -1)
+          if [ "$local_v" = "$npm_v" ]; then
+            if [ "$CONFIRM_OVERWRITE" != "YES" ]; then
+              echo "::error::Local version $local_v already published — bump Cargo.toml or re-run with confirm_overwrite=YES (rollback path)"
+              exit 1
+            fi
+            echo "Override accepted: republishing $local_v over registry $npm_v"
+          elif [ "$highest" = "$npm_v" ]; then
+            if [ "$CONFIRM_OVERWRITE" != "YES" ]; then
+              echo "::error::Registry version $npm_v is newer than local $local_v — refuse to roll back without confirm_overwrite=YES"
+              exit 1
+            fi
+            echo "Override accepted: rolling back from $npm_v to $local_v"
+          else
+            echo "Drift gate passed: local $local_v > registry $npm_v"
+          fi
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: [gates]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: ream
+            npm-pkg: ream-cli-linux-x64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary: ream
+            npm-pkg: ream-cli-darwin-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: ream
+            npm-pkg: ream-cli-darwin-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: ream.exe
+            npm-pkg: ream-cli-win32-x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target ${{ matrix.target }} -p ream-cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.npm-pkg }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+
+  publish:
+    needs: [build, gates]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Verify NPM_TOKEN secret
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error::NPM_TOKEN secret missing — set in repo settings before manual publish"
+            exit 1
+          fi
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Create platform-specific packages
+      - name: Package binaries
+        env:
+          TAG: ${{ needs.gates.outputs.tag }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$TAG" ]; then
+            echo "::error::TAG output from gates job is empty — refusing to publish with VERSION=\"\""
+            exit 1
+          fi
+          VERSION=${TAG#v}
+          for platform in linux-x64 darwin-x64 darwin-arm64 win32-x64; do
+            PKG="ream-cli-${platform}"
+            mkdir -p "npm/${PKG}"
+
+            if [ "$platform" = "win32-x64" ]; then
+              BINARY="ream.exe"
+            else
+              BINARY="ream"
+            fi
+
+            cp "artifacts/${PKG}/${BINARY}" "npm/${PKG}/"
+            chmod +x "npm/${PKG}/${BINARY}" 2>/dev/null || true
+
+            cat > "npm/${PKG}/package.json" << PKGEOF
+          {
+            "name": "@c9up/${PKG}",
+            "version": "${VERSION}",
+            "os": ["${platform%%-*}"],
+            "cpu": ["${platform##*-}"],
+            "bin": { "ream": "./${BINARY}" }
+          }
+          PKGEOF
+
+            cp README.md "npm/${PKG}/README.md"
+            cd "npm/${PKG}" && npm publish --access public && cd ../..
+          done
+
+      # Publish the main wrapper package
+      - name: Publish @c9up/ream-cli
+        env:
+          TAG: ${{ needs.gates.outputs.tag }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$TAG" ]; then
+            echo "::error::TAG output from gates job is empty — refusing to publish with VERSION=\"\""
+            exit 1
+          fi
+          VERSION=${TAG#v}
+          mkdir -p npm/ream-cli
+          cat > npm/ream-cli/package.json << PKGEOF
+          {
+            "name": "@c9up/ream-cli",
+            "version": "${VERSION}",
+            "description": "Ream CLI — Rust-native command-line tool",
+            "bin": { "ream": "bin/ream" },
+            "optionalDependencies": {
+              "@c9up/ream-cli-linux-x64": "${VERSION}",
+              "@c9up/ream-cli-darwin-x64": "${VERSION}",
+              "@c9up/ream-cli-darwin-arm64": "${VERSION}",
+              "@c9up/ream-cli-win32-x64": "${VERSION}"
+            }
+          }
+          PKGEOF
+
+          mkdir -p npm/ream-cli/bin
+          cat > npm/ream-cli/bin/ream << 'BINEOF'
+          #!/usr/bin/env node
+          const { execFileSync } = require('child_process');
+          const path = require('path');
+          const os = require('os');
+          const platformMap = {
+            'linux-x64': '@c9up/ream-cli-linux-x64',
+            'darwin-x64': '@c9up/ream-cli-darwin-x64',
+            'darwin-arm64': '@c9up/ream-cli-darwin-arm64',
+            'win32-x64': '@c9up/ream-cli-win32-x64',
+          };
+          const pkg = platformMap[`${os.platform()}-${os.arch()}`];
+          if (!pkg) { console.error(`Unsupported platform: ${os.platform()}-${os.arch()}`); process.exit(1); }
+          const bin = os.platform() === 'win32' ? 'ream.exe' : 'ream';
+          const binPath = path.join(require.resolve(`${pkg}/package.json`), '..', bin);
+          try { execFileSync(binPath, process.argv.slice(2), { stdio: 'inherit' }); }
+          catch (e) { process.exit(e.status || 1); }
+          BINEOF
+          chmod +x npm/ream-cli/bin/ream
+          cp README.md npm/ream-cli/README.md
+
+          cd npm/ream-cli && npm publish --access public
