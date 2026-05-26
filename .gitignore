@@ -1,0 +1,6 @@
+target/
+*.node
+.DS_Store
+
+# Local-only working notes (not part of the published source tree)
+CORRECTIONS.md
