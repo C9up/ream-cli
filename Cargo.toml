@@ -1,9 +1,9 @@
 [package]
-name = "ream-cli"
+name = "forge"
 version = "0.2.0"
 edition = "2021"
 license = "MIT"
-description = "Ream CLI — Rust-native command-line tool for the Ream framework"
+description = "Forge — Rust-native command-line tool for the Ream framework"
 repository = "https://github.com/C9up/ream-cli"
 
 [[bin]]
