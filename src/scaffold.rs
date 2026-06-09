@@ -175,6 +175,17 @@ fn package_json(name: &str, template: &str) -> String {
             format!(r#""@c9up/spectrum": "{FW}""#),
         ]);
     }
+    if template == "web" {
+        // Full web stack on top of the api set: HTML templating, events,
+        // middleware, signing, and date/recurrence.
+        deps.extend([
+            format!(r#""@c9up/inker": "{FW}""#),
+            format!(r#""@c9up/echo": "{FW}""#),
+            format!(r#""@c9up/blackhole": "{FW}""#),
+            format!(r#""@c9up/sigil": "{FW}""#),
+            format!(r#""@c9up/chronos": "{FW}""#),
+        ]);
+    }
 
     let imports = "    \"#app/WILDCARD\": \"./app/WILDCARD\",\n    \"#config/WILDCARD\": \"./config/WILDCARD\",\n    \"#providers/WILDCARD\": \"./providers/WILDCARD\",\n    \"#start/WILDCARD\": \"./start/WILDCARD\"".replace("WILDCARD", "*");
 
