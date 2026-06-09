@@ -204,7 +204,7 @@ fn main() {
             template::run(&name, destination.as_deref())
         }
         Commands::Add { package, dev, force, flags } => add::run(&package, dev, force, &flags),
-        Commands::Dev => commands::spawn_node("tsx", &["watch", "bin/server.ts"]),
+        Commands::Dev => commands::spawn_node("npx", &["tsx", "watch", "bin/server.ts"]),
         Commands::Start => commands::spawn_node("node", &["dist/bin/server.js"]),
         Commands::Build => commands::spawn_node("npx", &["tsc"]),
         Commands::MakeService { module, name, flags } => {
