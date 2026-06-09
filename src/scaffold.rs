@@ -157,7 +157,12 @@ fn write_file(root: &Path, path: &str, content: &str) -> Result<(), String> {
 }
 
 fn package_json(name: &str, template: &str) -> String {
-    let mut deps = vec![r#""@c9up/ream": "^0.1.0""#.to_string()];
+    let mut deps = vec![
+        r#""@c9up/ream": "^0.1.0""#.to_string(),
+        // bin/server.ts imports it directly; with pnpm's strict node_modules a
+        // transitive copy (via @c9up/atlas) isn't resolvable, so declare it.
+        r#""reflect-metadata": "^0.2""#.to_string(),
+    ];
     if template != "slim" {
         deps.extend([
             r#""@c9up/atlas": "^0.1.0""#.to_string(),

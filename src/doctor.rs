@@ -122,7 +122,11 @@ fn check_tsconfig() -> Check {
                 .join("\n");
             let has_decorators = uncommented.contains("experimentalDecorators");
             let has_metadata = uncommented.contains("emitDecoratorMetadata");
-            if has_decorators && has_metadata {
+            // The scaffolded app inherits decorators from the framework base
+            // (`extends: @c9up/ream/tsconfig.app.json`) rather than re-declaring
+            // them, so an `extends` onto the ream base satisfies the check too.
+            let extends_ream_base = uncommented.contains("@c9up/ream/tsconfig");
+            if (has_decorators && has_metadata) || extends_ream_base {
                 Check { name: "tsconfig.json", status: Status::Pass, message: "decorators enabled".to_string(), fix: None }
             } else {
                 Check { name: "tsconfig.json", status: Status::Warn, message: "missing decorator config".to_string(), fix: Some("Add experimentalDecorators and emitDecoratorMetadata".to_string()) }
