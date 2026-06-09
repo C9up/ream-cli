@@ -193,8 +193,8 @@ pub fn make(
 ///
 /// Emits the scope-cut warnings the spec promises:
 ///   - Existing `app/<module>/index.ts` barrel exports are NOT updated.
-///   - Migration timestamps are deterministic per-call; rapid successive
-///     calls disambiguate via a random suffix (see `chrono_timestamp`).
+///   - Migration filenames are `YYYYMMDDNNN_name.ts` (date + per-day sequence;
+///     see `next_migration_sequence`), so they sort chronologically.
 pub fn make_module(module: &str, name: &str, dry_run: bool, force: bool) -> Result<(), String> {
     validate_module_name(module, "module")?;
     validate_class_name(name, "name")?;
@@ -214,7 +214,7 @@ pub fn make_module(module: &str, name: &str, dry_run: bool, force: bool) -> Resu
         ));
     }
     warnings.push(
-        "migration timestamps include a random suffix to avoid same-second collisions; verify ordering matches your intent.".to_string(),
+        "migration filename uses today's date + a per-day sequence (YYYYMMDDNNN); verify ordering matches your intent.".to_string(),
     );
 
     flush_outcome_with_warnings(entries, warnings, dry_run, force)
@@ -624,9 +624,10 @@ export default class {class_name} extends Provider {{
 }
 
 fn generate_migration(name: &str) -> Result<(String, String), String> {
-    let timestamp = chrono_timestamp()?;
+    let date = today_yyyymmdd()?;
+    let seq = next_migration_sequence(&date);
     let snake = to_snake_case(name);
-    let path = format!("database/migrations/{timestamp}_{snake}.ts");
+    let path = format!("database/migrations/{date}{seq:03}_{snake}.ts");
     let class_name = to_pascal_case(name);
     let content = format!(
         r#"import {{ Migration }} from '@c9up/atlas'
@@ -635,7 +636,7 @@ fn generate_migration(name: &str) -> Result<(String, String), String> {
 export default class {class_name} extends Migration {{
   up() {{
     this.schema.createTable('TABLE_NAME', (t) => {{
-      t.uuid('id').primary()
+      t.increments('id') // or: t.uuid('id').primary() for app-generated UUIDs
       t.timestamps()
     }})
   }}
@@ -669,58 +670,36 @@ export default class {class_name} extends Seeder {{
     (path, content)
 }
 
-fn chrono_timestamp() -> Result<String, String> {
+fn today_yyyymmdd() -> Result<String, String> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| format!("System clock error: {e}"))?;
-    let secs = now.as_secs();
-    let nanos = now.subsec_nanos();
-    let sec = secs % 60;
-    let s = secs / 60;
-    let min = s % 60;
-    let s = s / 60;
-    let hour = s % 24;
-    let days = s / 24;
+    let days = now.as_secs() / 86_400;
     let (year, month, day) = days_to_date(days);
-
-    // Append a 4-char base-36 suffix derived from sub-second clock bits
-    // to disambiguate two migrations created in the same second. Without
-    // this, rapid `make:migration` calls produce identical filenames and
-    // the second call now becomes a Conflict (or, with --force, silent
-    // overwrite of the first).
-    let suffix = encode_base36(u64::from(nanos), 4);
-    Ok(format!(
-        "{year:04}{month:02}{day:02}{hour:02}{min:02}{sec:02}{suffix}"
-    ))
+    Ok(format!("{year:04}{month:02}{day:02}"))
 }
 
-fn encode_base36(mut n: u64, width: usize) -> String {
-    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    let mut buf = [b'0'; 16];
-    let mut i = buf.len();
-    if n == 0 {
-        i -= 1;
-        buf[i] = b'0';
-    } else {
-        while n > 0 && i > 0 {
-            i -= 1;
-            buf[i] = ALPHABET[(n % 36) as usize];
-            n /= 36;
+/// Next per-day migration sequence: scans `database/migrations` for existing
+/// `<date><NNN>_*.ts` files and returns max + 1 (1-based). Filenames are
+/// `YYYYMMDDNNN_name.ts`, so they sort chronologically and never collide.
+fn next_migration_sequence(date: &str) -> u32 {
+    let mut max = 0u32;
+    if let Ok(entries) = std::fs::read_dir("database/migrations") {
+        for entry in entries.flatten() {
+            let fname = entry.file_name();
+            let fname = fname.to_string_lossy();
+            if let Some(rest) = fname.strip_prefix(date) {
+                let digits: String = rest.chars().take(3).collect();
+                if digits.len() == 3 {
+                    if let Ok(n) = digits.parse::<u32>() {
+                        max = max.max(n);
+                    }
+                }
+            }
         }
     }
-    let s = std::str::from_utf8(&buf[i..]).unwrap_or("");
-    let s = if s.len() > width {
-        &s[s.len() - width..]
-    } else {
-        s
-    };
-    let mut out = String::with_capacity(width);
-    for _ in 0..width.saturating_sub(s.len()) {
-        out.push('0');
-    }
-    out.push_str(s);
-    out
+    max + 1
 }
 
 fn days_to_date(days: u64) -> (u64, u64, u64) {
@@ -874,28 +853,23 @@ mod tests {
     }
 
     #[test]
-    fn migration_timestamp_has_random_suffix() {
-        // Two calls in the same second must NOT produce the same path.
-        // Suffix is 4 base-36 chars derived from the sub-second clock.
-        let (path_a, _) = generate_migration("CreateOrders").unwrap();
-        let (path_b, _) = generate_migration("CreateOrders").unwrap();
-        // Same minute, same name → suffix differs in nearly all calls.
-        // We can't assert they always differ (clock granularity could
-        // hand back the same nanos in a tight loop), but the path must
-        // be longer than the old `<14-digit-timestamp>_<snake>.ts`
-        // shape, proving the suffix is stamped.
+    fn migration_filename_is_date_plus_sequence() {
+        // Filename shape: `YYYYMMDDNNN_<snake>.ts` — 8-digit date + 3-digit
+        // per-day sequence (the counter advances only as files land on disk,
+        // so two calls without writing legitimately yield the same path).
+        let (path, _) = generate_migration("CreateOrders").unwrap();
         let prefix = "database/migrations/";
-        assert!(path_a.starts_with(prefix));
-        assert!(path_b.starts_with(prefix));
-        let stem_a = path_a.trim_start_matches(prefix);
-        // 14-digit timestamp + 4-char suffix + "_create_orders.ts"
-        let underscore = stem_a.find('_').expect("must contain `_`");
-        let timestamp_with_suffix = &stem_a[..underscore];
+        assert!(path.starts_with(prefix));
+        let stem = path.trim_start_matches(prefix);
+        let underscore = stem.find('_').expect("must contain `_`");
+        let date_seq = &stem[..underscore];
         assert_eq!(
-            timestamp_with_suffix.len(),
-            14 + 4,
-            "timestamp+suffix should be 18 chars, got `{timestamp_with_suffix}`"
+            date_seq.len(),
+            8 + 3,
+            "date+sequence should be 11 digits, got `{date_seq}`"
         );
+        assert!(date_seq.chars().all(|c| c.is_ascii_digit()));
+        assert!(stem.ends_with("_create_orders.ts"));
     }
 
     #[test]
