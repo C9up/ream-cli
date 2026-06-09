@@ -8,6 +8,7 @@ mod codemods;
 mod commands;
 mod doctor;
 mod generator;
+mod mcp;
 mod nova;
 mod scaffold;
 mod template;
@@ -30,6 +31,16 @@ struct GenFlags {
     /// Allow overwriting existing files.
     #[arg(long)]
     force: bool,
+}
+
+#[derive(Subcommand)]
+enum McpAction {
+    /// Register @c9up/ream-mcp in the project's .mcp.json
+    Install,
+    /// Remove the Ream MCP server from .mcp.json
+    Uninstall,
+    /// Show whether the Ream MCP server is registered
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -166,6 +177,12 @@ enum Commands {
         flags: Vec<String>,
     },
 
+    /// Manage the Ream MCP server registration (.mcp.json)
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
+
     /// Run environment health checks
     Doctor,
 
@@ -244,6 +261,11 @@ fn main() {
                     package
                 )),
             }),
+        Commands::Mcp { action } => match action {
+            McpAction::Install => mcp::install(),
+            McpAction::Uninstall => mcp::uninstall(),
+            McpAction::Status => mcp::status(),
+        },
         Commands::Doctor => doctor::run(),
         Commands::Inspect => commands::run_inspect(),
         Commands::ScheduleList => commands::run_schedule_list(),
