@@ -189,7 +189,7 @@ fn package_json(name: &str, template: &str) -> String {
 
     let imports = "    \"#app/WILDCARD\": \"./app/WILDCARD\",\n    \"#config/WILDCARD\": \"./config/WILDCARD\",\n    \"#providers/WILDCARD\": \"./providers/WILDCARD\",\n    \"#start/WILDCARD\": \"./start/WILDCARD\"".replace("WILDCARD", "*");
 
-    format!("{{\n  \"name\": \"{}\",\n  \"version\": \"0.1.6\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"imports\": {{\n{}\n  }},\n  \"scripts\": {{\n    \"dev\": \"ream dev\",\n    \"build\": \"ream build\",\n    \"start\": \"ream start\",\n    \"test\": \"vitest run\"\n  }},\n  \"dependencies\": {{\n    {}\n  }},\n  \"devDependencies\": {{\n    \"@swc-node/register\": \"^1\",\n    \"tsx\": \"^4\",\n    \"typescript\": \"^5.7\",\n    \"vitest\": \"^3\"\n  }},\n  \"engines\": {{\n    \"node\": \">=22.0.0\"\n  }}\n}}", name, imports, deps.join(",\n    "))
+    format!("{{\n  \"name\": \"{}\",\n  \"version\": \"0.1.7\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"imports\": {{\n{}\n  }},\n  \"scripts\": {{\n    \"dev\": \"ream dev\",\n    \"build\": \"ream build\",\n    \"start\": \"ream start\",\n    \"test\": \"vitest run\"\n  }},\n  \"dependencies\": {{\n    {}\n  }},\n  \"devDependencies\": {{\n    \"@swc-node/register\": \"^1\",\n    \"tsx\": \"^4\",\n    \"typescript\": \"^5.7\",\n    \"vitest\": \"^3\"\n  }},\n  \"engines\": {{\n    \"node\": \">=22.0.0\"\n  }}\n}}", name, imports, deps.join(",\n    "))
 }
 
 fn tsconfig() -> String {
@@ -230,7 +230,7 @@ fn reamrc(template: &str) -> String {
     if template == "slim" {
         return "import { defineConfig } from '@c9up/ream'\n\nexport default defineConfig({\n  providers: [],\n  preloads: [],\n})\n".to_string();
     }
-    "import { defineConfig } from '@c9up/ream'\n\nexport default defineConfig({\n  providers: [\n    () => import('#providers/AppProvider.js'),\n  ],\n  preloads: [\n    () => import('#start/routes.js'),\n    () => import('#start/kernel.js'),\n  ],\n})\n".to_string()
+    "import { defineConfig } from '@c9up/ream'\n\nexport default defineConfig({\n  providers: [\n    () => import('@c9up/ream/events/provider'),\n    () => import('#providers/AppProvider.js'),\n  ],\n  preloads: [\n    () => import('#start/routes.js'),\n    () => import('#start/kernel.js'),\n  ],\n})\n".to_string()
 }
 
 fn write_api_template(root: &Path, name: &str) -> Result<(), String> {
