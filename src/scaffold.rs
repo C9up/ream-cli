@@ -248,7 +248,7 @@ fn write_api_template(root: &Path, name: &str) -> Result<(), String> {
 fn write_slim_template(root: &Path, _name: &str) -> Result<(), String> {
     write_file(
         root,
-        "app.ts",
+        "bin/server.ts",
         "import { Ignitor } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\nconst app = new Ignitor({\n  port: Number(process.env.PORT ?? 3000),\n  serverFactory: createHyperServerFactory(),\n})\n  .httpServer()\n  .routes((router) => {\n    router.get('/', async ({ response }) => {\n      response.status(200).send('Hello from Ream!')\n    })\n  })\n\nawait app.start()\nconsole.log(`\\n  ➜ Ream ready on http://localhost:${process.env.PORT ?? 3000}\\n`)\n",
     )?;
     Ok(())
@@ -415,6 +415,27 @@ mod tests {
         assert!(
             !bin.contains("createRequire"),
             "bin/server.ts must not hand-roll napi loading anymore"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Audit 2026-06-13: the slim template wrote its entry at `app.ts`, but the
+    /// shared scripts (`ream dev` → `tsx watch bin/server.ts`, `ream start` →
+    /// `node dist/bin/server.js`) target bin/server.ts — so a fresh slim project
+    /// could not boot. The entry must live at bin/server.ts.
+    #[test]
+    fn slim_template_entry_is_bin_server() {
+        let root = unique_root("slim-template");
+        write_slim_template(&root, "demo").unwrap();
+        let bin = fs::read_to_string(root.join("bin/server.ts")).unwrap();
+        assert!(
+            bin.contains("createHyperServerFactory"),
+            "slim bin/server.ts must bootstrap the server — got:\n{}",
+            bin
+        );
+        assert!(
+            !root.join("app.ts").exists(),
+            "slim must not write app.ts (ream dev/start target bin/server.ts)"
         );
         let _ = fs::remove_dir_all(&root);
     }
