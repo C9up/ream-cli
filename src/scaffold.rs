@@ -227,7 +227,12 @@ fn env_typing(database: &str) -> String {
 }
 
 fn reamrc(template: &str) -> String {
-    if template == "slim" {
+    // slim AND microservice get an empty reamrc: the microservice template only
+    // writes a standalone bin/server.ts (EventBus, no Ignitor/reamrc) and never
+    // creates #start/routes, #start/kernel, or providers/AppProvider — so the
+    // non-slim preloads would fail to resolve for any reamrc-driven command
+    // (audit 2026-06-13).
+    if template == "slim" || template == "microservice" {
         return "import { defineConfig } from '@c9up/ream'\n\nexport default defineConfig({\n  providers: [],\n  preloads: [],\n})\n".to_string();
     }
     "import { defineConfig } from '@c9up/ream'\n\nexport default defineConfig({\n  providers: [\n    () => import('@c9up/ream/events/provider'),\n    () => import('#providers/AppProvider.js'),\n  ],\n  preloads: [\n    () => import('#start/routes.js'),\n    () => import('#start/kernel.js'),\n  ],\n})\n".to_string()
@@ -285,6 +290,17 @@ mod tests {
     /// caller (mirrors `run()`'s top-of-function canonicalization), so the
     /// write succeeds and lands at the expected path regardless of the
     /// process's current working directory.
+    #[test]
+    fn microservice_reamrc_has_no_phantom_preloads() {
+        // The microservice template only writes bin/server.ts, so its reamrc must
+        // not preload #start/routes, #start/kernel, or providers/AppProvider —
+        // those files never exist (audit 2026-06-13).
+        let rc = reamrc("microservice");
+        assert!(rc.contains("preloads: []"));
+        assert!(!rc.contains("#start/routes"));
+        assert!(!rc.contains("AppProvider"));
+    }
+
     #[test]
     fn write_file_anchors_to_the_canonical_root_passed_by_the_caller() {
         let root = unique_root("anchor");

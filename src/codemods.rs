@@ -181,6 +181,19 @@ pub fn configure_with_flags(
         .spawn()
         .map_err(|e| format!("Failed to run configure check: {}", e))?;
 
+    // Drain stderr on a thread BEFORE waiting: a probe that writes more than the
+    // pipe buffer (~64KB) would block on a full pipe while the parent blocks in
+    // wait_timeout — a deadlock surfaced as a misleading timeout (audit 2026-06-13).
+    // On kill (timeout) the pipe closes and the reader returns, so the join is safe.
+    let stderr_reader = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        })
+    });
+
     let timeout = probe_timeout();
     let exit_status = match child.wait_timeout(timeout) {
         Ok(Some(status)) => status,
@@ -199,11 +212,9 @@ pub fn configure_with_flags(
         Err(e) => return Err(format!("Failed to wait for configure check: {}", e)),
     };
 
-    let mut stderr_bytes = Vec::new();
-    if let Some(mut pipe) = child.stderr.take() {
-        use std::io::Read;
-        let _ = pipe.read_to_end(&mut stderr_bytes);
-    }
+    let stderr_bytes = stderr_reader
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
 
     if exit_status.success() {
         // ok — fall through to configure run

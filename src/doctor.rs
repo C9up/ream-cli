@@ -51,7 +51,10 @@ pub fn run() -> Result<(), String> {
 
 fn check_node_version() -> Check {
     match Command::new("node").arg("--version").output() {
-        Ok(output) => {
+        // Gate on exit status (mirrors commands.rs): a broken node shim that
+        // exits non-zero with empty stdout would otherwise parse major=0 and
+        // report a confusing Fail with an empty version string (audit 2026-06-13).
+        Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let major: u32 = version.trim_start_matches('v').split('.').next()
                 .and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -63,6 +66,7 @@ fn check_node_version() -> Check {
                 Check { name: "Node.js", status: Status::Fail, message: format!("{} — Node.js 22+ required", version), fix: Some("Install Node.js 22 LTS: https://nodejs.org/".to_string()) }
             }
         }
+        Ok(_) => Check { name: "Node.js", status: Status::Fail, message: "`node --version` exited non-zero — check your Node install or shim".to_string(), fix: Some("Install Node.js 22 LTS: https://nodejs.org/".to_string()) },
         Err(_) => Check { name: "Node.js", status: Status::Fail, message: "not found".to_string(), fix: Some("Install Node.js 22 LTS: https://nodejs.org/".to_string()) },
     }
 }
