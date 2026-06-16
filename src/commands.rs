@@ -83,6 +83,10 @@ pub fn run_migration(action: &str) -> Result<(), String> {
         const runner = new MigrationRunner(db, {{ migrationsDir: 'database/migrations', dialect: db.dialect }});
         {}
         await app.stop();
+        // Force-exit: app.stop() doesn't close app-owned handles (atlas pool,
+        // an ioredis client built when config loads), so the event loop would
+        // otherwise stay alive and the one-shot command would hang (exit 124).
+        process.exit(0);
     "#, runner_action);
 
     let status = inherited_status("node", &["--import", "@swc-node/register/esm-register", "--input-type=module", "-e", &script])?;
@@ -133,6 +137,7 @@ pub fn run_inspect() -> Result<(), String> {
 
         console.log(`\nTotal: ${routes.length} routes, ${providers.length} providers.`);
         await app.stop();
+        process.exit(0); // one-shot CLI: don't let app-owned handles keep it alive
     "#;
 
     let status = inherited_status("node", &["--import", "@swc-node/register/esm-register", "--input-type=module", "-e", script])?;
@@ -172,7 +177,7 @@ pub fn run_schedule_list() -> Result<(), String> {
         if (tasks.length === 0) {
             console.log('No scheduled tasks registered.');
             await app.stop();
-            return;
+            process.exit(0);
         }
 
         // Truncate over-long column values with an ellipsis so the
@@ -202,6 +207,7 @@ pub fn run_schedule_list() -> Result<(), String> {
         }
 
         await app.stop();
+        process.exit(0);
     "#;
 
     let status = inherited_status(
