@@ -74,7 +74,7 @@ enum Commands {
         flags: Vec<String>,
     },
 
-    /// Start development server (spawns tsx watch)
+    /// Start development server (node --watch + swc-node; emits decorator metadata for DI)
     Dev,
 
     /// Start production server (spawns node)
@@ -221,7 +221,7 @@ fn main() {
             template::run(&name, destination.as_deref())
         }
         Commands::Add { package, dev, force, flags } => add::run(&package, dev, force, &flags),
-        Commands::Dev => commands::spawn_node("npx", &["tsx", "watch", "bin/server.ts"]),
+        Commands::Dev => commands::spawn_node("node", &commands::dev_args()),
         Commands::Start => commands::spawn_node("node", &["dist/bin/server.js"]),
         Commands::Build => commands::spawn_node("npx", &["tsc"]),
         Commands::MakeService { module, name, flags } => {

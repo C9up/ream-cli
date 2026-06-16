@@ -28,6 +28,21 @@ pub fn spawn_node(cmd: &str, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+/// Args for `ream dev` — Node's native `--watch` + `@swc-node/register`.
+///
+/// swc-node reads `.swcrc` (which extends `@c9up/ream/swcrc.app.json`,
+/// `decoratorMetadata: true`) and EMITS `design:paramtypes` — required for IoC
+/// constructor injection. `tsx` / esbuild can NOT emit it, which silently broke
+/// DI in dev (every injected dependency resolved to `undefined`).
+pub fn dev_args() -> [&'static str; 4] {
+    [
+        "--import",
+        "@swc-node/register/esm-register",
+        "--watch",
+        "bin/server.ts",
+    ]
+}
+
 /// Run a migration command via Node.js inline script.
 /// Boots the app, resolves db from the container, creates a MigrationRunner, and delegates.
 pub fn run_migration(action: &str) -> Result<(), String> {
@@ -322,4 +337,28 @@ pub fn info() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dev_uses_swc_node_not_tsx() {
+        let args = dev_args();
+        // swc-node emits design:paramtypes (decorator metadata) → IoC DI works.
+        assert!(
+            args.contains(&"@swc-node/register/esm-register"),
+            "ream dev must load swc-node so decorator metadata is emitted: {:?}",
+            args
+        );
+        // tsx/esbuild can't emit decorator metadata → DI silently breaks.
+        assert!(
+            !args.iter().any(|a| a.contains("tsx")),
+            "ream dev must NOT use tsx (esbuild cannot emit design:paramtypes): {:?}",
+            args
+        );
+        // Native --watch drives the reload (replaces `tsx watch`).
+        assert!(args.contains(&"--watch"), "ream dev must watch for changes: {:?}", args);
+    }
 }
