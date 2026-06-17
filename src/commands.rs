@@ -76,6 +76,10 @@ pub fn run_migration(action: &str) -> Result<(), String> {
         import 'reflect-metadata';
         import {{ Ignitor }} from '@c9up/ream';
         import {{ MigrationRunner }} from '@c9up/atlas';
+        // We drive migrations explicitly below — tell AtlasProvider NOT to also
+        // auto-migrate on boot (it would double-apply, and re-apply right before
+        // a rollback/status pass). Must be set before .start() boots providers.
+        process.env.REAM_SKIP_BOOT_MIGRATE = '1';
         const rc = (await import('./reamrc.ts')).default;
         const app = await new Ignitor(new URL('./', import.meta.url))
             .useRcFile(rc).setEnvironment('console').start();
