@@ -68,7 +68,8 @@ pub fn run(name: &str) -> Result<(), String> {
 
     // Template-specific files
     match template {
-        "api" | "web" => write_api_template(root, name)?,
+        "api" => write_api_template(root, name)?,
+        "web" => write_web_template(root, name)?,
         "slim" => write_slim_template(root, name)?,
         "microservice" => write_microservice_template(root, name)?,
         _ => write_slim_template(root, name)?,
@@ -187,7 +188,7 @@ fn package_json(name: &str, template: &str) -> String {
         ]);
     }
 
-    let imports = "    \"#app/WILDCARD\": \"./app/WILDCARD\",\n    \"#config/WILDCARD\": \"./config/WILDCARD\",\n    \"#providers/WILDCARD\": \"./providers/WILDCARD\",\n    \"#start/WILDCARD\": \"./start/WILDCARD\"".replace("WILDCARD", "*");
+    let imports = "    \"#app/WILDCARD\": \"./app/WILDCARD\",\n    \"#middleware/WILDCARD\": \"./app/middleware/WILDCARD\",\n    \"#config/WILDCARD\": \"./config/WILDCARD\",\n    \"#providers/WILDCARD\": \"./providers/WILDCARD\",\n    \"#start/WILDCARD\": \"./start/WILDCARD\"".replace("WILDCARD", "*");
 
     format!("{{\n  \"name\": \"{}\",\n  \"version\": \"0.1.7\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"imports\": {{\n{}\n  }},\n  \"scripts\": {{\n    \"dev\": \"ream dev\",\n    \"build\": \"ream build\",\n    \"start\": \"ream start\",\n    \"test\": \"vitest run\"\n  }},\n  \"dependencies\": {{\n    {}\n  }},\n  \"devDependencies\": {{\n    \"@swc-node/register\": \"^1\",\n    \"tsx\": \"^4\",\n    \"typescript\": \"^5.7\",\n    \"vitest\": \"^3\"\n  }},\n  \"engines\": {{\n    \"node\": \">=22.0.0\"\n  }}\n}}", name, imports, deps.join(",\n    "))
 }
@@ -196,7 +197,7 @@ fn tsconfig() -> String {
     // Extend the framework-shipped base — apps only declare `paths` + their
     // own `include`. Strict / target / decorators / etc. all come from the
     // base so a Ream bump can adjust them across the ecosystem at once.
-    let paths = "      \"#app/WILDCARD\": [\"./app/WILDCARD\"],\n      \"#config/WILDCARD\": [\"./config/WILDCARD\"],\n      \"#providers/WILDCARD\": [\"./providers/WILDCARD\"],\n      \"#start/WILDCARD\": [\"./start/WILDCARD\"]".replace("WILDCARD", "*");
+    let paths = "      \"#app/WILDCARD\": [\"./app/WILDCARD\"],\n      \"#middleware/WILDCARD\": [\"./app/middleware/WILDCARD\"],\n      \"#config/WILDCARD\": [\"./config/WILDCARD\"],\n      \"#providers/WILDCARD\": [\"./providers/WILDCARD\"],\n      \"#start/WILDCARD\": [\"./start/WILDCARD\"]".replace("WILDCARD", "*");
     format!("{{\n  \"extends\": \"@c9up/ream/tsconfig.app.json\",\n  \"compilerOptions\": {{\n    \"paths\": {{\n{}\n    }}\n  }},\n  \"include\": [\"app\", \"bin\", \"config\", \"providers\", \"start\", \"tests\", \"reamrc.ts\"]\n}}", paths)
 }
 
@@ -210,10 +211,13 @@ fn swcrc() -> String {
 
 fn env_file(name: &str, database: &str) -> String {
     let db_name = name.replace('-', "_");
+    // APP_KEY signs cookies, sessions, and CSRF tokens. Placeholder here — change
+    // it to a unique 32+ byte secret per app/environment before going to prod.
+    let app_key = "APP_KEY=change-me-to-a-unique-32+-byte-secret!!\n";
     if database == "postgres" {
-        format!("APP_NAME={}\nNODE_ENV=development\nPORT=3000\n\nDB_CONNECTION=postgres\nDB_HOST=localhost\nDB_PORT=5432\nDB_DATABASE={}\nDB_USER=postgres\nDB_PASSWORD=secret\n", name, db_name)
+        format!("APP_NAME={}\n{}NODE_ENV=development\nPORT=3000\n\nDB_CONNECTION=postgres\nDB_HOST=localhost\nDB_PORT=5432\nDB_DATABASE={}\nDB_USER=postgres\nDB_PASSWORD=secret\n", name, app_key, db_name)
     } else {
-        format!("APP_NAME={}\nNODE_ENV=development\nPORT=3000\n\nDB_CONNECTION=sqlite\nDB_FILENAME=./data/{}.sqlite\n", name, name)
+        format!("APP_NAME={}\n{}NODE_ENV=development\nPORT=3000\n\nDB_CONNECTION=sqlite\nDB_FILENAME=./data/{}.sqlite\n", name, app_key, name)
     }
 }
 
@@ -223,7 +227,7 @@ fn env_typing(database: &str) -> String {
     } else {
         "  DB_CONNECTION: 'postgres' | 'sqlite'\n  DB_FILENAME: string"
     };
-    format!("export interface Env {{\n  APP_NAME: string\n  NODE_ENV: 'development' | 'production' | 'test'\n  PORT: string\n{}\n}}\n\ndeclare global {{\n  namespace NodeJS {{\n    interface ProcessEnv extends Env {{}}\n  }}\n}}\n", db_vars)
+    format!("export interface Env {{\n  APP_NAME: string\n  APP_KEY: string\n  NODE_ENV: 'development' | 'production' | 'test'\n  PORT: string\n{}\n}}\n\ndeclare global {{\n  namespace NodeJS {{\n    interface ProcessEnv extends Env {{}}\n  }}\n}}\n", db_vars)
 }
 
 fn reamrc(template: &str) -> String {
@@ -235,10 +239,19 @@ fn reamrc(template: &str) -> String {
     if template == "slim" || template == "microservice" {
         return "import { defineConfig } from '@c9up/ream'\n\nexport default defineConfig({\n  providers: [],\n  preloads: [],\n})\n".to_string();
     }
+    // The web template pre-wires the session/cookie auth kit: sigil (hashing),
+    // warden (auth strategies), and blackhole (signed-CSRF + security headers)
+    // providers, on top of the api set.
+    if template == "web" {
+        return "import { defineConfig } from '@c9up/ream'\n\nexport default defineConfig({\n  providers: [\n    () => import('@c9up/sigil/provider'),\n    () => import('@c9up/warden/provider'),\n    () => import('@c9up/blackhole/provider'),\n    () => import('@c9up/ream/events/provider'),\n    () => import('#providers/AppProvider.js'),\n  ],\n  preloads: [\n    () => import('#start/routes.js'),\n    () => import('#start/kernel.js'),\n  ],\n})\n".to_string();
+    }
     "import { defineConfig } from '@c9up/ream'\n\nexport default defineConfig({\n  providers: [\n    () => import('@c9up/ream/events/provider'),\n    () => import('#providers/AppProvider.js'),\n  ],\n  preloads: [\n    () => import('#start/routes.js'),\n    () => import('#start/kernel.js'),\n  ],\n})\n".to_string()
 }
 
-fn write_api_template(root: &Path, name: &str) -> Result<(), String> {
+/// Shared skeleton for the api + web templates: server entry, AppProvider, and
+/// a root route. Each template adds its own `start/kernel.ts` on top (write_file
+/// refuses to overwrite, so the kernel must NOT be written here).
+fn write_app_base(root: &Path, name: &str) -> Result<(), String> {
     write_file(
         root,
         "bin/server.ts",
@@ -246,7 +259,129 @@ fn write_api_template(root: &Path, name: &str) -> Result<(), String> {
     )?;
     write_file(root, "providers/AppProvider.ts", "import { Provider } from '@c9up/ream'\n\nexport default class AppProvider extends Provider {\n  register() {}\n  async boot() {}\n  async start() {}\n  async ready() {}\n  async shutdown() {}\n}\n")?;
     write_file(root, "start/routes.ts", &format!("import router from '@c9up/ream/services/router'\n\nrouter.get('/', async ({{ response }}) => {{\n  response.status(200).json({{ name: '{}', status: 'running' }})\n}})\n", name))?;
+    Ok(())
+}
+
+fn write_api_template(root: &Path, name: &str) -> Result<(), String> {
+    write_app_base(root, name)?;
     write_file(root, "start/kernel.ts", "import server from '@c9up/ream/services/server'\n\nserver.use([\n  async (ctx, next) => {\n    const start = Date.now()\n    await next()\n    ctx.response.header('x-response-time', `${Date.now() - start}ms`)\n  },\n])\n")?;
+    Ok(())
+}
+
+/// Web template — the api skeleton plus the session/cookie auth kit:
+/// a security-aware kernel (blackhole signed-CSRF + cookie session), the
+/// session auth middleware, and auth + blackhole config. Mirrors the proven
+/// kitchen-sink wiring so `ream new web` boots a cookie-authed app out of the box.
+fn write_web_template(root: &Path, name: &str) -> Result<(), String> {
+    write_app_base(root, name)?;
+
+    // Kernel: blackhole (signed CSRF + headers) → body parser → cookie session
+    // → auth middleware. Session runs BEFORE auth so `ctx.session` is populated
+    // when `@Guard('session')` resolves the user.
+    write_file(
+        root,
+        "start/kernel.ts",
+        r#"import { blackholeMiddleware } from '@c9up/blackhole/middleware'
+import { BodyParserMiddleware, SessionMiddleware } from '@c9up/ream'
+import router from '@c9up/ream/services/router'
+
+const bodyParser = new BodyParserMiddleware()
+
+// Cookie session (stateless — data lives in the encrypted cookie). Secret is
+// APP_KEY; the dev fallback keeps `ream dev` working before you set one.
+const session = new SessionMiddleware({
+  driver: 'cookie',
+  secret: process.env.APP_KEY ?? 'change-me-to-a-unique-32+-byte-secret!!',
+})
+
+router.use([
+  blackholeMiddleware,
+  (ctx, next) => bodyParser.handle(ctx, next),
+  (ctx, next) => session.handle(ctx, next),
+  () => import('#middleware/auth_middleware.js'),
+])
+"#,
+    )?;
+
+    // Session-first auth (AdonisJS web-kit shape). Add a `jwt` block and select
+    // it per-route with `@Guard('jwt')` if you also expose an API.
+    write_file(
+        root,
+        "config/auth.ts",
+        r#"import type { UserPayload } from '@c9up/warden'
+
+export default {
+  defaultStrategy: 'session',
+  session: {
+    // TODO: resolve your authenticated user from the session-stored id.
+    async findUser(_id: string | number): Promise<UserPayload | null> {
+      return null
+    },
+  },
+}
+"#,
+    )?;
+
+    // Signed double-submit CSRF (HMAC over APP_KEY). Cookie/session routes are
+    // protected; add Bearer-only API prefixes to `exceptRoutes` (Bearer is
+    // CSRF-immune, so it needs no token).
+    write_file(
+        root,
+        "config/blackhole.ts",
+        r#"import { defineConfig } from '@c9up/blackhole/config'
+
+export default defineConfig({
+  xss: true,
+  csrf: { exceptRoutes: [] },
+  secret: process.env.APP_KEY ?? 'change-me-to-a-unique-32+-byte-secret!!',
+})
+"#,
+    )?;
+
+    // Auth middleware: populate `ctx.auth` from the cookie session. The guard
+    // enforcer (`@Guard('session')`) then asserts authentication per route.
+    write_file(
+        root,
+        "app/middleware/auth_middleware.ts",
+        r#"import type { HttpContext } from '@c9up/ream'
+import type { AuthResult } from '@c9up/warden'
+import auth from '@c9up/warden/services/main'
+
+interface StrategyWithContext {
+  verifyWithContext(token: string, ctx: { session?: unknown }): Promise<AuthResult>
+}
+
+function hasVerifyWithContext(value: unknown): value is StrategyWithContext {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'verifyWithContext' in value &&
+    typeof value.verifyWithContext === 'function'
+  )
+}
+
+export default class AuthMiddleware {
+  async handle(ctx: HttpContext, next: () => Promise<void>) {
+    if (ctx.session && auth.getStrategyNames().includes('session')) {
+      const strategy = auth.getStrategy('session')
+      if (hasVerifyWithContext(strategy)) {
+        const result = await strategy.verifyWithContext('', { session: ctx.session })
+        if (result.authenticated && result.user) {
+          ctx.auth = {
+            authenticated: true,
+            user: result.user,
+            roles: result.user.roles ?? [],
+            permissions: result.user.permissions ?? [],
+          }
+        }
+      }
+    }
+    await next()
+  }
+}
+"#,
+    )?;
+
     Ok(())
 }
 
@@ -431,6 +566,43 @@ mod tests {
         assert!(
             !bin.contains("createRequire"),
             "bin/server.ts must not hand-roll napi loading anymore"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The web template must pre-wire the session/cookie auth kit: a kernel that
+    /// registers blackhole + a cookie SessionMiddleware before the auth
+    /// middleware, a session-first `config/auth.ts`, signed-CSRF
+    /// `config/blackhole.ts`, and the session auth middleware.
+    #[test]
+    fn web_template_prewires_session_auth() {
+        let root = unique_root("web-template");
+        write_web_template(&root, "demo").unwrap();
+
+        let kernel = fs::read_to_string(root.join("start/kernel.ts")).unwrap();
+        assert!(
+            kernel.contains("SessionMiddleware") && kernel.contains("blackholeMiddleware"),
+            "web kernel must wire SessionMiddleware + blackhole — got:\n{}",
+            kernel
+        );
+
+        let auth = fs::read_to_string(root.join("config/auth.ts")).unwrap();
+        assert!(
+            auth.contains("defaultStrategy: 'session'") && auth.contains("findUser"),
+            "config/auth.ts must default to the session strategy — got:\n{}",
+            auth
+        );
+
+        let bh = fs::read_to_string(root.join("config/blackhole.ts")).unwrap();
+        assert!(
+            bh.contains("csrf") && bh.contains("secret"),
+            "config/blackhole.ts must enable signed CSRF with a secret — got:\n{}",
+            bh
+        );
+
+        assert!(
+            root.join("app/middleware/auth_middleware.ts").exists(),
+            "web template must write the session auth middleware"
         );
         let _ = fs::remove_dir_all(&root);
     }
