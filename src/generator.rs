@@ -129,9 +129,7 @@ pub fn plan_or_write(
     // link targets.
     if let Ok(meta) = fs::symlink_metadata(full_path) {
         if meta.file_type().is_symlink() {
-            return Err(format!(
-                "refusing to write through a symlink: {path}"
-            ));
+            return Err(format!("refusing to write through a symlink: {path}"));
         }
     }
 
@@ -151,7 +149,10 @@ pub fn plan_or_write(
     }
 
     fs::write(full_path, content).map_err(|e| format!("Failed to write file: {e}"))?;
-    eprintln!("  \x1b[32m{}\x1b[0m {path}", if exists { "modified" } else { "created" });
+    eprintln!(
+        "  \x1b[32m{}\x1b[0m {path}",
+        if exists { "modified" } else { "created" }
+    );
     Ok(if exists {
         WriteOutcome::Modified(path.to_string())
     } else {
@@ -235,9 +236,7 @@ fn validate_name_relaxed(s: &str, label: &str) -> Result<(), String> {
     }
     let first = s.chars().next().expect("non-empty checked above");
     if first == '-' || first == '_' {
-        return Err(format!(
-            "{label} '{s}' must not start with '-' or '_'"
-        ));
+        return Err(format!("{label} '{s}' must not start with '-' or '_'"));
     }
     if !s
         .chars()
@@ -295,11 +294,7 @@ fn require_module(module: &str, kind: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn flush_outcome(
-    entries: Vec<(String, String)>,
-    dry_run: bool,
-    force: bool,
-) -> Result<(), String> {
+fn flush_outcome(entries: Vec<(String, String)>, dry_run: bool, force: bool) -> Result<(), String> {
     flush_outcome_with_warnings(entries, Vec::new(), dry_run, force)
 }
 
@@ -422,18 +417,14 @@ fn rollback_writes(rollbacks: &[(String, Option<Vec<u8>>)]) {
         match prior {
             Some(bytes) => {
                 if let Err(e) = fs::write(path, bytes) {
-                    eprintln!(
-                        "  \x1b[33mrollback\x1b[0m: failed to restore {path}: {e}"
-                    );
+                    eprintln!("  \x1b[33mrollback\x1b[0m: failed to restore {path}: {e}");
                 } else {
                     eprintln!("  \x1b[33mrollback\x1b[0m: restored {path}");
                 }
             }
             None => {
                 if let Err(e) = fs::remove_file(path) {
-                    eprintln!(
-                        "  \x1b[33mrollback\x1b[0m: failed to remove {path}: {e}"
-                    );
+                    eprintln!("  \x1b[33mrollback\x1b[0m: failed to remove {path}: {e}");
                 } else {
                     eprintln!("  \x1b[33mrollback\x1b[0m: removed {path}");
                 }
@@ -779,14 +770,8 @@ mod tests {
     fn plan_or_write_dry_does_not_touch_disk() {
         // Use a path that is virtually guaranteed not to exist in any cwd.
         let mut plan = Plan::default();
-        let outcome = plan_or_write(
-            &mut plan,
-            true,
-            false,
-            "app/orders/Order.ts",
-            "// content",
-        )
-        .unwrap();
+        let outcome =
+            plan_or_write(&mut plan, true, false, "app/orders/Order.ts", "// content").unwrap();
         assert!(matches!(outcome, WriteOutcome::Created(_)));
         assert_eq!(plan.files.len(), 1);
         assert_eq!(plan.files[0].path, "app/orders/Order.ts");
@@ -796,14 +781,7 @@ mod tests {
     #[test]
     fn plan_or_write_rejects_path_traversal() {
         let mut plan = Plan::default();
-        let err = plan_or_write(
-            &mut plan,
-            true,
-            false,
-            "../etc/passwd",
-            "evil",
-        )
-        .unwrap_err();
+        let err = plan_or_write(&mut plan, true, false, "../etc/passwd", "evil").unwrap_err();
         assert!(err.contains("outside project root"));
     }
 
@@ -847,8 +825,19 @@ mod tests {
         let migration = generate_migration("CreateOrders").unwrap().1;
         let seeder = generate_seeder("orders", "User").1;
         let service = generate_service("orders", "Mailer").1;
-        for body in [&entity, &controller, &validator, &provider, &migration, &seeder, &service] {
-            assert!(body.contains("@implements FR"), "missing FR marker in template: {body}");
+        for body in [
+            &entity,
+            &controller,
+            &validator,
+            &provider,
+            &migration,
+            &seeder,
+            &service,
+        ] {
+            assert!(
+                body.contains("@implements FR"),
+                "missing FR marker in template: {body}"
+            );
         }
     }
 

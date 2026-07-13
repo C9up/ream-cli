@@ -360,7 +360,10 @@ mod tests {
             vec!["smtp".to_string(), "resend".to_string(), "ses".to_string()],
         )];
         let parsed = extract_parsed(&build_script(&flags));
-        assert_eq!(parsed["transports"], serde_json::json!(["smtp", "resend", "ses"]));
+        assert_eq!(
+            parsed["transports"],
+            serde_json::json!(["smtp", "resend", "ses"])
+        );
     }
 
     #[test]

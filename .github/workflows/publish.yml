@@ -101,6 +101,18 @@ jobs:
             echo "Drift gate passed: local $local_v > registry $npm_v"
           fi
 
+      # Quality gate — a publish must not ship code that fails fmt / clippy /
+      # tests, not only code that compiles. build + publish both `needs: [gates]`.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Rust quality gate (fmt + clippy + tests)
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test -p ream-cli
+
   build:
     name: Build (${{ matrix.target }})
     needs: [gates]

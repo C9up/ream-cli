@@ -10,14 +10,18 @@ npm install -g @c9up/ream-cli
 
 ## Commands
 
+Run `ream --help` (or `ream <command> --help`) for the authoritative, always
+up-to-date list. The current surface:
+
 ```bash
-# Create a new project
-ream new my-app
+# Scaffolding
+ream new my-app                       # create a new Ream project
+ream template kitchen-sink            # install a project template from its upstream repo
 
 # Development
-ream dev          # start with hot-reload
-ream build        # compile TypeScript
-ream start        # run production
+ream dev                              # dev server (node --watch + swc-node, DI metadata)
+ream build                            # compile TypeScript to dist/
+ream start                            # run production (spawns node)
 
 # Code generation
 ream make:controller order Order
@@ -26,15 +30,30 @@ ream make:entity order OrderItem
 ream make:validator order CreateOrder
 ream make:provider Stripe
 ream make:migration create_orders_table
+ream make:seeder OrdersSeeder
+ream make:module order Order          # entity + controller + validator + migration
 
-# Package management
-ream configure @c9up/atlas
-ream configure @c9up/photon
-ream configure @c9up/warden
+# Database
+ream migrate                          # run pending migrations
+ream migrate:rollback                 # roll back the last batch
+ream migrate:status                   # show migration status
+
+# Packages
+ream add @c9up/atlas                  # install a package AND run its configure() hook
+ream configure @c9up/photon           # (re-)run a package's configure() hook
+
+# Scheduling
+ream schedule:list                    # list registered scheduled tasks
+ream schedule:run <task>              # run one task now (admin override)
+
+# Integrations / tooling
+ream mcp                              # manage the Ream MCP server registration (.mcp.json)
+ream nova:vapid:generate              # generate Web Push VAPID keys into .env
+ream inspect                          # inspect routes, providers, decorated services
 
 # Diagnostics
-ream doctor
-ream info
+ream doctor                           # environment health checks
+ream info                             # version info
 ```
 
 ## Build from source

@@ -24,8 +24,7 @@ pub fn run_vapid_generate(force: bool) -> Result<(), String> {
 
     let env_path = Path::new(".env");
     let existing = if env_path.exists() {
-        std::fs::read_to_string(env_path)
-            .map_err(|e| format!("Failed to read .env: {}", e))?
+        std::fs::read_to_string(env_path).map_err(|e| format!("Failed to read .env: {}", e))?
     } else {
         String::new()
     };
@@ -33,10 +32,9 @@ pub fn run_vapid_generate(force: bool) -> Result<(), String> {
     if !force {
         if let Some(value) = read_env_value(&existing, "NOVA_VAPID_PRIVATE_KEY") {
             if !value.is_empty() {
-                return Err(format!(
-                    "NOVA_VAPID_PRIVATE_KEY is already set in .env.\n  \
+                return Err("NOVA_VAPID_PRIVATE_KEY is already set in .env.\n  \
                      Re-run with --force to overwrite, or `unset NOVA_VAPID_PRIVATE_KEY` first."
-                ));
+                    .to_string());
             }
         }
     }
@@ -49,8 +47,7 @@ pub fn run_vapid_generate(force: bool) -> Result<(), String> {
         updated = upsert_env_var(&updated, "NOVA_VAPID_SUBJECT", SUBJECT_DEFAULT);
     }
 
-    std::fs::write(env_path, updated)
-        .map_err(|e| format!("Failed to write .env: {}", e))?;
+    std::fs::write(env_path, updated).map_err(|e| format!("Failed to write .env: {}", e))?;
 
     println!();
     println!("  \x1b[32mGenerated VAPID key pair\x1b[0m");
@@ -63,7 +60,10 @@ pub fn run_vapid_generate(force: bool) -> Result<(), String> {
         "  NOVA_VAPID_PRIVATE_KEY = [redacted — written to .env, {} chars]",
         pair.private.chars().count()
     );
-    println!("  NOVA_VAPID_SUBJECT     = {} (edit this!)", SUBJECT_DEFAULT);
+    println!(
+        "  NOVA_VAPID_SUBJECT     = {} (edit this!)",
+        SUBJECT_DEFAULT
+    );
     println!();
     println!("  Wrote .env. Move private key to a secrets manager before deploying.");
     println!();
@@ -99,11 +99,15 @@ fn invoke_node() -> Result<VapidKeyPair, String> {
         return Err("Node printed no JSON (is @c9up/nova installed?)".to_string());
     }
 
-    let parsed: serde_json::Value = serde_json::from_str(trimmed)
-        .map_err(|e| format!("Failed to parse VAPID JSON: {}", e))?;
-    let public = parsed.get("publicKey").and_then(|v| v.as_str())
+    let parsed: serde_json::Value =
+        serde_json::from_str(trimmed).map_err(|e| format!("Failed to parse VAPID JSON: {}", e))?;
+    let public = parsed
+        .get("publicKey")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| "Missing 'publicKey' in JSON output".to_string())?;
-    let private = parsed.get("privateKey").and_then(|v| v.as_str())
+    let private = parsed
+        .get("privateKey")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| "Missing 'privateKey' in JSON output".to_string())?;
     Ok(VapidKeyPair {
         public: public.to_string(),
@@ -186,7 +190,10 @@ mod tests {
     #[test]
     fn read_env_value_returns_existing_value() {
         let env = "FOO=bar\nNOVA_VAPID_PRIVATE_KEY=abc123\n# comment\n";
-        assert_eq!(read_env_value(env, "NOVA_VAPID_PRIVATE_KEY"), Some("abc123".to_string()));
+        assert_eq!(
+            read_env_value(env, "NOVA_VAPID_PRIVATE_KEY"),
+            Some("abc123".to_string())
+        );
     }
 
     #[test]
@@ -198,19 +205,28 @@ mod tests {
     #[test]
     fn read_env_value_strips_double_quotes() {
         let env = "NOVA_VAPID_PRIVATE_KEY=\"with-quotes\"\n";
-        assert_eq!(read_env_value(env, "NOVA_VAPID_PRIVATE_KEY"), Some("with-quotes".to_string()));
+        assert_eq!(
+            read_env_value(env, "NOVA_VAPID_PRIVATE_KEY"),
+            Some("with-quotes".to_string())
+        );
     }
 
     #[test]
     fn read_env_value_skips_comment_lines_with_matching_key() {
         let env = "# NOVA_VAPID_PRIVATE_KEY=should-skip\nNOVA_VAPID_PRIVATE_KEY=real\n";
-        assert_eq!(read_env_value(env, "NOVA_VAPID_PRIVATE_KEY"), Some("real".to_string()));
+        assert_eq!(
+            read_env_value(env, "NOVA_VAPID_PRIVATE_KEY"),
+            Some("real".to_string())
+        );
     }
 
     #[test]
     fn read_env_value_returns_empty_string_for_blank_value() {
         let env = "NOVA_VAPID_PRIVATE_KEY=\n";
-        assert_eq!(read_env_value(env, "NOVA_VAPID_PRIVATE_KEY"), Some(String::new()));
+        assert_eq!(
+            read_env_value(env, "NOVA_VAPID_PRIVATE_KEY"),
+            Some(String::new())
+        );
     }
 
     #[test]
@@ -244,6 +260,9 @@ mod tests {
     fn upsert_env_var_does_not_clobber_commented_key() {
         let env = "# NOVA_VAPID_PUBLIC_KEY=do-not-touch\n";
         let out = upsert_env_var(env, "NOVA_VAPID_PUBLIC_KEY", "real");
-        assert_eq!(out, "# NOVA_VAPID_PUBLIC_KEY=do-not-touch\nNOVA_VAPID_PUBLIC_KEY=real\n");
+        assert_eq!(
+            out,
+            "# NOVA_VAPID_PUBLIC_KEY=do-not-touch\nNOVA_VAPID_PUBLIC_KEY=real\n"
+        );
     }
 }

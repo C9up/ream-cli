@@ -16,7 +16,11 @@ mod template;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "ream", version, about = "Ream — Rust-powered Node.js framework")]
+#[command(
+    name = "ream",
+    version,
+    about = "Ream — Rust-powered Node.js framework"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

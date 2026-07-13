@@ -58,8 +58,8 @@ fn lockfile_for(pm: PackageManager) -> &'static str {
 /// Returns the detected PM plus the list of secondary lockfiles in the
 /// dispatch directory (for the "ignored lockfile" warning at the call site).
 fn detect_package_manager(package: &str) -> Result<(PackageManager, Vec<&'static str>), String> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| format!("Failed to read current directory: {}", e))?;
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("Failed to read current directory: {}", e))?;
     detect_package_manager_from(&cwd, package)
 }
 
@@ -86,16 +86,13 @@ fn detect_package_manager_from(
         }
         if !found_in_dir.is_empty() {
             let (pm, _) = found_in_dir[0];
-            let secondary: Vec<&'static str> =
-                found_in_dir[1..].iter().map(|(_, f)| *f).collect();
+            let secondary: Vec<&'static str> = found_in_dir[1..].iter().map(|(_, f)| *f).collect();
             return Ok((pm, secondary));
         }
         if !workspace_hint && dir.join("pnpm-workspace.yaml").exists() {
             workspace_hint = true;
         }
-        if !bun_present
-            && (dir.join("bun.lockb").exists() || dir.join("bun.lock").exists())
-        {
+        if !bun_present && (dir.join("bun.lockb").exists() || dir.join("bun.lock").exists()) {
             bun_present = true;
         }
         // Repo boundary — stop walking once we hit `.git`.
@@ -148,23 +145,22 @@ fn install_args(pm: PackageManager, dev: bool, package: &str) -> Vec<String> {
 /// Parse an npm-spec string into `(bare_name, full_spec)`.
 ///
 /// Accepts:
-///   - `pkg`                       → bare = `pkg`
-///   - `pkg@1.2.3`                 → bare = `pkg`
-///   - `pkg@^1.2.3`                → bare = `pkg`
-///   - `pkg@latest`                → bare = `pkg` (dist-tag)
-///   - `@scope/pkg`                → bare = `@scope/pkg`
-///   - `@scope/pkg@1.2.3`          → bare = `@scope/pkg`
-///   - `pkg@npm:other-pkg`         → bare = `pkg` (npm alias; PM installs `other-pkg`
-///                                   under `node_modules/pkg`, so `pkg` is what we
-///                                   import — see https://docs.npmjs.com/cli/v10/configuring-npm/package-json#dependencies).
+/// - `pkg` → bare = `pkg`
+/// - `pkg@1.2.3` → bare = `pkg`
+/// - `pkg@^1.2.3` → bare = `pkg`
+/// - `pkg@latest` → bare = `pkg` (dist-tag)
+/// - `@scope/pkg` → bare = `@scope/pkg`
+/// - `@scope/pkg@1.2.3` → bare = `@scope/pkg`
+/// - `pkg@npm:other-pkg` → bare = `pkg` (npm alias; PM installs `other-pkg` under
+///   `node_modules/pkg`, so `pkg` is what we import — see
+///   <https://docs.npmjs.com/cli/v10/configuring-npm/package-json#dependencies>).
 ///
-/// Rejects (with actionable two-step error):
-///   - URLs / tarballs (`https://…tgz`, `http://`)         — registry-of-record unknown
-///   - git refs (`git+https://`, `git+ssh://`, `github:`,  — bare name not derivable
-///     `git:`)
-///   - file paths (`file:./…`, `./…`, `../…`, `/abs/…`)    — local install requires
-///                                                            reading the target's
-///                                                            package.json
+/// Rejects (with an actionable two-step error):
+/// - URLs / tarballs (`https://…tgz`, `http://`) — registry-of-record unknown
+/// - git refs (`git+https://`, `git+ssh://`, `github:`, `git:`) — bare name not
+///   derivable
+/// - file paths (`file:./…`, `./…`, `../…`, `/abs/…`) — local install requires
+///   reading the target's package.json
 ///
 /// `bare_name` is what reaches `configure_with_flags` (the dynamic `import()` spec
 /// MUST be the bare package name; embedding a version specifier would break Node
@@ -180,22 +176,20 @@ pub(crate) fn parse_npm_spec(input: &str) -> Result<(String, String), String> {
     // Order matters: `git+https://…` matches both git-ref and URL patterns,
     // but the more specific git-ref reason is the actionable one for the user
     // (the workaround they want is `pnpm add git+…` not "drop the protocol").
-    let forbidden_kind = if input.starts_with("git+")
-        || input.starts_with("github:")
-        || input.starts_with("git:")
-    {
-        Some("git ref")
-    } else if input.contains("://") {
-        Some("URL/tarball")
-    } else if input.starts_with("file:")
-        || input.starts_with("./")
-        || input.starts_with("../")
-        || input.starts_with('/')
-    {
-        Some("file path")
-    } else {
-        None
-    };
+    let forbidden_kind =
+        if input.starts_with("git+") || input.starts_with("github:") || input.starts_with("git:") {
+            Some("git ref")
+        } else if input.contains("://") {
+            Some("URL/tarball")
+        } else if input.starts_with("file:")
+            || input.starts_with("./")
+            || input.starts_with("../")
+            || input.starts_with('/')
+        {
+            Some("file path")
+        } else {
+            None
+        };
     if let Some(kind) = forbidden_kind {
         return Err(format!(
             "Unsupported package spec ({}): {}\n         \
@@ -419,7 +413,10 @@ mod tests {
     fn parse_simple_equals_flag() {
         let raw = vec!["--transports=smtp".to_string()];
         let out = parse_flag_pairs(&raw).unwrap();
-        assert_eq!(out, vec![("transports".to_string(), vec!["smtp".to_string()])]);
+        assert_eq!(
+            out,
+            vec![("transports".to_string(), vec!["smtp".to_string()])]
+        );
     }
 
     #[test]
@@ -474,7 +471,11 @@ mod tests {
     fn parse_rejects_positional_argument() {
         let raw = vec!["positional".to_string()];
         let err = parse_flag_pairs(&raw).unwrap_err();
-        assert!(err.contains("Unexpected positional argument"), "got: {}", err);
+        assert!(
+            err.contains("Unexpected positional argument"),
+            "got: {}",
+            err
+        );
     }
 
     #[test]
@@ -511,30 +512,19 @@ mod tests {
     fn parse_rejects_key_starting_with_digit() {
         let raw = vec!["--1stuff=value".to_string()];
         let err = parse_flag_pairs(&raw).unwrap_err();
-        assert!(
-            err.contains("must start with a letter"),
-            "got: {}",
-            err
-        );
+        assert!(err.contains("must start with a letter"), "got: {}", err);
     }
 
     #[test]
     fn parse_rejects_key_with_invalid_chars() {
         let raw = vec!["--bad key=value".to_string()];
         let err = parse_flag_pairs(&raw).unwrap_err();
-        assert!(
-            err.contains("only letters, digits"),
-            "got: {}",
-            err
-        );
+        assert!(err.contains("only letters, digits"), "got: {}", err);
     }
 
     #[test]
     fn parse_accepts_kebab_and_snake_keys() {
-        let raw = vec![
-            "--http-only=true".to_string(),
-            "--user_id=42".to_string(),
-        ];
+        let raw = vec!["--http-only=true".to_string(), "--user_id=42".to_string()];
         let out = parse_flag_pairs(&raw).unwrap();
         assert_eq!(
             out,
@@ -557,7 +547,11 @@ mod tests {
     fn install_args_pnpm_dev() {
         assert_eq!(
             install_args(PackageManager::Pnpm, true, "@c9up/atlas"),
-            vec!["add".to_string(), "-D".to_string(), "@c9up/atlas".to_string()]
+            vec![
+                "add".to_string(),
+                "-D".to_string(),
+                "@c9up/atlas".to_string()
+            ]
         );
     }
 
@@ -573,7 +567,11 @@ mod tests {
     fn install_args_yarn_dev() {
         assert_eq!(
             install_args(PackageManager::Yarn, true, "@c9up/photon"),
-            vec!["add".to_string(), "-D".to_string(), "@c9up/photon".to_string()]
+            vec![
+                "add".to_string(),
+                "-D".to_string(),
+                "@c9up/photon".to_string()
+            ]
         );
     }
 
@@ -589,7 +587,11 @@ mod tests {
     fn install_args_npm_dev() {
         assert_eq!(
             install_args(PackageManager::Npm, true, "@c9up/warden"),
-            vec!["install".to_string(), "--save-dev".to_string(), "@c9up/warden".to_string()]
+            vec![
+                "install".to_string(),
+                "--save-dev".to_string(),
+                "@c9up/warden".to_string()
+            ]
         );
     }
 
@@ -611,8 +613,7 @@ mod tests {
         std::fs::write(parent.join("pnpm-lock.yaml"), "").unwrap();
         std::fs::create_dir_all(parent.join(".git")).unwrap();
 
-        let (pm, secondary) =
-            detect_package_manager_from(&child, "@c9up/atlas").unwrap();
+        let (pm, secondary) = detect_package_manager_from(&child, "@c9up/atlas").unwrap();
         assert_eq!(pm, PackageManager::Pnpm);
         assert!(secondary.is_empty());
 
@@ -633,8 +634,7 @@ mod tests {
         std::fs::write(dir.join("pnpm-workspace.yaml"), "").unwrap();
         std::fs::create_dir_all(dir.join(".git")).unwrap();
 
-        let (pm, secondary) =
-            detect_package_manager_from(&dir, "@c9up/atlas").unwrap();
+        let (pm, secondary) = detect_package_manager_from(&dir, "@c9up/atlas").unwrap();
         assert_eq!(pm, PackageManager::Pnpm);
         assert!(secondary.is_empty());
 
@@ -712,8 +712,8 @@ mod tests {
 
     #[test]
     fn parse_npm_spec_rejects_https_tarball() {
-        let err = parse_npm_spec("https://registry.npmjs.org/react/-/react-19.0.0.tgz")
-            .unwrap_err();
+        let err =
+            parse_npm_spec("https://registry.npmjs.org/react/-/react-19.0.0.tgz").unwrap_err();
         assert!(err.contains("URL/tarball"), "got: {}", err);
         assert!(err.contains("manual two-step"), "got: {}", err);
     }
@@ -744,7 +744,11 @@ mod tests {
         // `..` in the bare-name path component must still be caught — would be
         // a path-traversal attempt against the dynamic `import()`.
         let err = parse_npm_spec("../evil@1.0.0").unwrap_err();
-        assert!(err.contains("file path"), "../ is rejected as file path first; got: {}", err);
+        assert!(
+            err.contains("file path"),
+            "../ is rejected as file path first; got: {}",
+            err
+        );
 
         let err2 = parse_npm_spec("@x/.bin@1.0.0").unwrap_err();
         assert!(err2.contains("Invalid package name"), "got: {}", err2);

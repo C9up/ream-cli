@@ -8,7 +8,10 @@ use std::process::Command;
 
 pub fn run(name: &str) -> Result<(), String> {
     // Validate project name
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return Err("Project name must be alphanumeric with hyphens/underscores only".to_string());
     }
 
@@ -39,7 +42,10 @@ pub fn run(name: &str) -> Result<(), String> {
         .map_err(|e| format!("Prompt failed: {}", e))?;
     let database = databases[db_idx];
 
-    println!("\n  Scaffolding {} (template={}, database={})...\n", name, template, database);
+    println!(
+        "\n  Scaffolding {} (template={}, database={})...\n",
+        name, template, database
+    );
 
     // Create project structure, then resolve the project root once against
     // the actual filesystem so every subsequent write_file() call is anchored
@@ -500,9 +506,8 @@ mod tests {
         let root = unique_root("o-excl");
         let target = root.join("collision.ts");
         fs::write(&target, "// original").unwrap();
-        let err = write_file(&root, "collision.ts", "// new").expect_err(
-            "writing onto an existing regular file must error (O_EXCL guarantee)",
-        );
+        let err = write_file(&root, "collision.ts", "// new")
+            .expect_err("writing onto an existing regular file must error (O_EXCL guarantee)");
         // create_new returns ErrorKind::AlreadyExists → "File exists".
         assert!(
             err.contains("Failed to create") || err.contains("exists"),

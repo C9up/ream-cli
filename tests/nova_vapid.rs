@@ -28,10 +28,7 @@ fn nova_vapid_generate_subcommand_is_registered() {
 
 #[test]
 fn nova_vapid_generate_refuses_without_package_json() {
-    let temp = std::env::temp_dir().join(format!(
-        "ream-nova-vapid-test-{}",
-        std::process::id()
-    ));
+    let temp = std::env::temp_dir().join(format!("ream-nova-vapid-test-{}", std::process::id()));
     std::fs::create_dir_all(&temp).expect("create temp dir");
 
     let output = cli()

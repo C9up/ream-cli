@@ -22,7 +22,11 @@ pub fn spawn_node(cmd: &str, args: &[&str]) -> Result<(), String> {
     let status = inherited_status(cmd, args)?;
 
     if !status.success() {
-        return Err(format!("'{}' exited with code {}", cmd, status.code().unwrap_or(-1)));
+        return Err(format!(
+            "'{}' exited with code {}",
+            cmd,
+            status.code().unwrap_or(-1)
+        ));
     }
 
     Ok(())
@@ -54,25 +58,32 @@ pub fn run_migration(action: &str) -> Result<(), String> {
     }
 
     let runner_action = match action {
-        "migrate" => r#"
+        "migrate" => {
+            r#"
             const executed = await runner.migrate();
             if (executed.length === 0) { console.log('  Nothing to migrate.'); }
             else { for (const n of executed) console.log('  migrated:', n); }
-        "#,
-        "migrate:rollback" => r#"
+        "#
+        }
+        "migrate:rollback" => {
+            r#"
             const rolled = await runner.rollback();
             if (rolled.length === 0) { console.log('  Nothing to rollback.'); }
             else { for (const n of rolled) console.log('  rolled back:', n); }
-        "#,
-        "migrate:status" => r#"
+        "#
+        }
+        "migrate:status" => {
+            r#"
             const statuses = await runner.status();
             if (statuses.length === 0) { console.log('  No migrations found.'); }
             else { for (const s of statuses) console.log(`  ${s.status === 'applied' ? '✓' : '○'} ${s.name}${s.batch ? ' (batch ' + s.batch + ')' : ''}`); }
-        "#,
+        "#
+        }
         _ => return Err(format!("Unknown migration action: {}", action)),
     };
 
-    let script = format!(r#"
+    let script = format!(
+        r#"
         import 'reflect-metadata';
         import {{ Ignitor }} from '@c9up/ream';
         import {{ MigrationRunner }} from '@c9up/atlas';
@@ -91,12 +102,26 @@ pub fn run_migration(action: &str) -> Result<(), String> {
         // an ioredis client built when config loads), so the event loop would
         // otherwise stay alive and the one-shot command would hang (exit 124).
         process.exit(0);
-    "#, runner_action);
+    "#,
+        runner_action
+    );
 
-    let status = inherited_status("node", &["--import", "@swc-node/register/esm-register", "--input-type=module", "-e", &script])?;
+    let status = inherited_status(
+        "node",
+        &[
+            "--import",
+            "@swc-node/register/esm-register",
+            "--input-type=module",
+            "-e",
+            &script,
+        ],
+    )?;
 
     if !status.success() {
-        return Err(format!("Migration failed with code {}", status.code().unwrap_or(-1)));
+        return Err(format!(
+            "Migration failed with code {}",
+            status.code().unwrap_or(-1)
+        ));
     }
 
     Ok(())
@@ -144,10 +169,22 @@ pub fn run_inspect() -> Result<(), String> {
         process.exit(0); // one-shot CLI: don't let app-owned handles keep it alive
     "#;
 
-    let status = inherited_status("node", &["--import", "@swc-node/register/esm-register", "--input-type=module", "-e", script])?;
+    let status = inherited_status(
+        "node",
+        &[
+            "--import",
+            "@swc-node/register/esm-register",
+            "--input-type=module",
+            "-e",
+            script,
+        ],
+    )?;
 
     if !status.success() {
-        return Err(format!("Inspect failed with code {}", status.code().unwrap_or(-1)));
+        return Err(format!(
+            "Inspect failed with code {}",
+            status.code().unwrap_or(-1)
+        ));
     }
 
     Ok(())
@@ -159,7 +196,9 @@ pub fn run_schedule_list() -> Result<(), String> {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
     if !std::path::Path::new("reamrc.ts").exists() {
-        return Err("reamrc.ts not found — schedule:list requires a Ream framework project".to_string());
+        return Err(
+            "reamrc.ts not found — schedule:list requires a Ream framework project".to_string(),
+        );
     }
 
     let script = r#"
@@ -216,11 +255,20 @@ pub fn run_schedule_list() -> Result<(), String> {
 
     let status = inherited_status(
         "node",
-        &["--import", "@swc-node/register/esm-register", "--input-type=module", "-e", script],
+        &[
+            "--import",
+            "@swc-node/register/esm-register",
+            "--input-type=module",
+            "-e",
+            script,
+        ],
     )?;
 
     if !status.success() {
-        return Err(format!("schedule:list failed with code {}", status.code().unwrap_or(-1)));
+        return Err(format!(
+            "schedule:list failed with code {}",
+            status.code().unwrap_or(-1)
+        ));
     }
     Ok(())
 }
@@ -232,7 +280,9 @@ pub fn run_schedule_run(name: &str) -> Result<(), String> {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
     if !std::path::Path::new("reamrc.ts").exists() {
-        return Err("reamrc.ts not found — schedule:run requires a Ream framework project".to_string());
+        return Err(
+            "reamrc.ts not found — schedule:run requires a Ream framework project".to_string(),
+        );
     }
 
     // Reject empty / whitespace-only names at the CLI boundary so
@@ -246,8 +296,8 @@ pub fn run_schedule_run(name: &str) -> Result<(), String> {
     // JSON-escape the task name so it is safe to embed inside a Node
     // inline script. Prevents injection via crafted task names like
     // `foo'); require('child_process').exec(...); //`.
-    let escaped_name = serde_json::to_string(name)
-        .map_err(|e| format!("Failed to encode task name: {}", e))?;
+    let escaped_name =
+        serde_json::to_string(name).map_err(|e| format!("Failed to encode task name: {}", e))?;
 
     let script = format!(
         r#"
@@ -289,7 +339,13 @@ pub fn run_schedule_run(name: &str) -> Result<(), String> {
 
     let status = inherited_status(
         "node",
-        &["--import", "@swc-node/register/esm-register", "--input-type=module", "-e", &script],
+        &[
+            "--import",
+            "@swc-node/register/esm-register",
+            "--input-type=module",
+            "-e",
+            &script,
+        ],
     )?;
 
     // Preserve the child's exit code verbatim so scripts can
@@ -369,6 +425,10 @@ mod tests {
             args
         );
         // Native --watch drives the reload (replaces `tsx watch`).
-        assert!(args.contains(&"--watch"), "ream dev must watch for changes: {:?}", args);
+        assert!(
+            args.contains(&"--watch"),
+            "ream dev must watch for changes: {:?}",
+            args
+        );
     }
 }
