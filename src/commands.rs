@@ -524,7 +524,7 @@ mod tests {
         // literal. What could terminate that literal is a double quote or a
         // newline; interpolated raw, this name would close it and run code.
         let hostile = "a\", process.exit(42); //\nb".to_string();
-        let options = test_options(&[hostile.clone()], None, None, false);
+        let options = test_options(std::slice::from_ref(&hostile), None, None, false);
 
         let rendered = options.to_string();
         // Round-trips as data...
