@@ -405,6 +405,92 @@ pub fn info() -> Result<(), String> {
     Ok(())
 }
 
+/// Run the test suites declared in the rc file's `tests` block.
+///
+/// The AdonisJS stratification: the framework reads its rc file and hands the
+/// suites to the runner. All of that lives in TypeScript (`@c9up/ream/test-runner`),
+/// so this stays a thin spawn — the same split as `run_migration`.
+pub fn run_tests(
+    suites: &[String],
+    threads: Option<usize>,
+    reporters: Option<&str>,
+    bail: bool,
+) -> Result<(), String> {
+    if !std::path::Path::new("package.json").exists() {
+        return Err("Not in a Ream project (no package.json found)".to_string());
+    }
+    if !std::path::Path::new("reamrc.ts").exists() {
+        return Err("reamrc.ts not found — `ream test` reads its suites from the rc file".to_string());
+    }
+
+    let options = test_options(suites, threads, reporters, bail);
+
+    let script = format!(
+        r#"
+        import 'reflect-metadata';
+        import {{ runTestsFromRcFile }} from '@c9up/ream/test-runner';
+        const options = {};
+        for (const key of Object.keys(options)) {{
+            if (options[key] === null) delete options[key];
+        }}
+        try {{
+            process.exitCode = await runTestsFromRcFile('./reamrc.ts', options);
+        }} catch (err) {{
+            // A misspelled suite name is a user error, not a crash — print what
+            // is wrong and what exists, without a stack trace.
+            process.stderr.write('ream: ' + (err instanceof Error ? err.message : String(err)) + '\n');
+            process.exitCode = 1;
+        }}
+    "#,
+        options
+    );
+
+    let status = inherited_status(
+        "node",
+        &[
+            "--import",
+            "@swc-node/register/esm-register",
+            "--input-type=module",
+            "-e",
+            &script,
+        ],
+    )?;
+
+    if !status.success() {
+        return Err(format!("Tests failed with code {}", status.code().unwrap_or(-1)));
+    }
+
+    Ok(())
+}
+
+/// The options object handed to `runTestsFromRcFile`.
+///
+/// Built through serde rather than string concatenation: a suite name comes
+/// from the command line, and interpolating it raw into the script would let it
+/// break out into executable code.
+fn test_options(
+    suites: &[String],
+    threads: Option<usize>,
+    reporters: Option<&str>,
+    bail: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "suites": suites,
+        "threads": threads,
+        "reporters": reporters.map(|r| {
+            r.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        }),
+        "bail": bail,
+        // Explicit rather than inherited: this process also carries
+        // `--input-type=module`, which a worker spawned with a file entry
+        // must not receive.
+        "nodeArgs": ["--import", "@swc-node/register/esm-register"],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,5 +516,46 @@ mod tests {
             "ream dev must watch for changes: {:?}",
             args
         );
+    }
+
+    #[test]
+    fn a_suite_name_cannot_break_out_of_the_generated_script() {
+        // The name reaches an inline `node -e` script inside a JSON string
+        // literal. What could terminate that literal is a double quote or a
+        // newline; interpolated raw, this name would close it and run code.
+        let hostile = "a\", process.exit(42); //\nb".to_string();
+        let options = test_options(&[hostile.clone()], None, None, false);
+
+        let rendered = options.to_string();
+        // Round-trips as data...
+        assert_eq!(options["suites"][0], serde_json::Value::String(hostile));
+        // ...and every literal-terminating character is escaped on the way out.
+        assert!(rendered.contains("\\\""), "the quote is escaped: {}", rendered);
+        assert!(rendered.contains("\\n"), "the newline is escaped: {}", rendered);
+        assert!(!rendered.contains('\n'), "no raw newline survives");
+    }
+
+    #[test]
+    fn reporters_are_split_and_emptied_entries_dropped() {
+        let options = test_options(&[], None, Some("spec, json ,,"), false);
+        assert_eq!(options["reporters"], serde_json::json!(["spec", "json"]));
+    }
+
+    #[test]
+    fn absent_options_stay_null_so_the_script_deletes_them() {
+        // `runTests` fills its own defaults; a `null` would override them.
+        let options = test_options(&[], None, None, false);
+        assert!(options["threads"].is_null());
+        assert!(options["reporters"].is_null());
+    }
+
+    #[test]
+    fn workers_are_spawned_with_the_swc_loader_not_input_type() {
+        let options = test_options(&[], None, None, false);
+        let args = options["nodeArgs"].as_array().expect("nodeArgs is a list");
+        assert_eq!(args, &serde_json::json!(["--import", "@swc-node/register/esm-register"]).as_array().unwrap().clone());
+        // `--input-type=module` belongs to the `-e` parent only: a worker gets a
+        // FILE, and Node rejects the flag there.
+        assert!(!options["nodeArgs"].to_string().contains("input-type"));
     }
 }

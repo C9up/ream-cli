@@ -87,6 +87,21 @@ enum Commands {
     /// Build TypeScript to dist/
     Build,
 
+    /// Run the test suites declared in reamrc.ts (`tests` block)
+    Test {
+        /// Suite names to run. Omit to run every declared suite, in order.
+        suites: Vec<String>,
+        /// Concurrent worker processes
+        #[arg(long)]
+        threads: Option<usize>,
+        /// Comma-separated reporters, e.g. spec,json
+        #[arg(long)]
+        reporters: Option<String>,
+        /// Stop at the first failure
+        #[arg(long)]
+        bail: bool,
+    },
+
     /// Generate a service class
     #[command(name = "make:service")]
     MakeService {
@@ -228,6 +243,12 @@ fn main() {
         Commands::Dev => commands::spawn_node("node", &commands::dev_args()),
         Commands::Start => commands::spawn_node("node", &["dist/bin/server.js"]),
         Commands::Build => commands::spawn_node("npx", &["tsc"]),
+        Commands::Test {
+            suites,
+            threads,
+            reporters,
+            bail,
+        } => commands::run_tests(&suites, threads, reporters.as_deref(), bail),
         Commands::MakeService { module, name, flags } => {
             generator::make("service", &module, &name, flags.dry_run, flags.force)
         }
