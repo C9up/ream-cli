@@ -94,7 +94,10 @@ pub fn run_migration(action: &str) -> Result<(), String> {
         const rc = (await import('./reamrc.ts')).default;
         const app = await new Ignitor(new URL('./', import.meta.url))
             .useRcFile(rc).setEnvironment('console').start();
-        const db = app.getApp().container.resolve('db');
+        // `container.resolve` is ASYNC (ream's container mirrors Adonis fold).
+        // Without the await, `db` is a Promise: `db.dialect` reads undefined and
+        // the runner fails with "db.execute is not a function".
+        const db = await app.getApp().container.resolve('db');
         const runner = new MigrationRunner(db, {{ migrationsDir: 'database/migrations', dialect: db.dialect }});
         {}
         await app.stop();
@@ -143,7 +146,7 @@ pub fn run_inspect() -> Result<(), String> {
         const rc = (await import('./reamrc.ts')).default;
         const app = await new Ignitor(new URL('./', import.meta.url))
             .useRcFile(rc).setEnvironment('console').start();
-        const router = app.getApp().container.resolve('router');
+        const router = await app.getApp().container.resolve('router');
 
         console.log('\nRoutes:');
         const routes = router.getRoutes ? router.getRoutes() : [];
@@ -209,7 +212,7 @@ pub fn run_schedule_list() -> Result<(), String> {
             .useRcFile(rc).setEnvironment('console').start();
         let scheduler;
         try {
-            scheduler = app.getApp().container.resolve('scheduler');
+            scheduler = await app.getApp().container.resolve('scheduler');
         } catch {
             console.error("No ScheduleProvider is registered. Add ScheduleProvider to the providers list in reamrc.ts.");
             await app.stop();
@@ -308,7 +311,7 @@ pub fn run_schedule_run(name: &str) -> Result<(), String> {
             .useRcFile(rc).setEnvironment('console').start();
         let scheduler;
         try {{
-            scheduler = app.getApp().container.resolve('scheduler');
+            scheduler = await app.getApp().container.resolve('scheduler');
         }} catch {{
             console.error("No ScheduleProvider is registered. Add ScheduleProvider to the providers list in reamrc.ts.");
             await app.stop();
@@ -557,5 +560,40 @@ mod tests {
         // `--input-type=module` belongs to the `-e` parent only: a worker gets a
         // FILE, and Node rejects the flag there.
         assert!(!options["nodeArgs"].to_string().contains("input-type"));
+    }
+
+    /// Every `container.resolve(...)` inside the inline JS scripts must be
+    /// awaited.
+    ///
+    /// ream's container is asynchronous (Adonis fold parity), so a missing
+    /// `await` yields a Promise that fails LATE and misleadingly: `ream migrate`
+    /// reported "db.execute is not a function", and `ream routes` silently
+    /// printed no routes at all because `router.getRoutes` read as undefined on
+    /// a Promise. Nothing executes these scripts in CI, so this guards them at
+    /// the source level.
+    #[test]
+    fn generated_scripts_await_every_container_resolve() {
+        // Stop at the test module: its own string literals mention the call.
+        let file = include_str!("commands.rs");
+        let source = file.split("#[cfg(test)]").next().unwrap_or(file);
+        // The await sits ahead of the receiver (`await app.getApp().container…`),
+        // so the whole statement is what has to carry it.
+        for line in source.lines() {
+            if line.contains("container.resolve(") {
+                assert!(
+                    line.contains("await "),
+                    "unawaited container.resolve() in generated script: {}",
+                    line.trim()
+                );
+            }
+        }
+    }
+
+    /// The migration script must not double-apply migrations: AtlasProvider
+    /// auto-migrates on boot unless this flag is set before `.start()`.
+    #[test]
+    fn migration_script_skips_the_boot_migration() {
+        let source = include_str!("commands.rs");
+        assert!(source.contains("REAM_SKIP_BOOT_MIGRATE"));
     }
 }
