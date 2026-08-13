@@ -322,7 +322,10 @@ fn framework_commands() -> Vec<commands::ListEntry> {
         .filter(|sub| sub.get_name() != "help")
         .map(|sub| {
             let name = sub.get_name().to_string();
-            let description = sub.get_about().map(|about| about.to_string()).unwrap_or_default();
+            let description = sub
+                .get_about()
+                .map(|about| about.to_string())
+                .unwrap_or_default();
             let (args, flags) = describe_arguments(sub);
             commands::ListEntry {
                 metadata: serde_json::json!({
@@ -355,7 +358,10 @@ fn describe_arguments(sub: &clap::Command) -> (Vec<serde_json::Value>, Vec<serde
 
     for arg in sub.get_arguments() {
         let id = arg.get_id().as_str();
-        let description = arg.get_help().map(|help| help.to_string()).unwrap_or_default();
+        let description = arg
+            .get_help()
+            .map(|help| help.to_string())
+            .unwrap_or_default();
 
         if arg.is_positional() {
             args.push(serde_json::json!({

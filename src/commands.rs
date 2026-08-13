@@ -191,7 +191,10 @@ pub fn run_repl() -> Result<(), String> {
     )?;
 
     if !status.success() {
-        return Err(format!("repl exited with code {}", status.code().unwrap_or(-1)));
+        return Err(format!(
+            "repl exited with code {}",
+            status.code().unwrap_or(-1)
+        ));
     }
     Ok(())
 }
@@ -242,12 +245,10 @@ pub fn run_generate_key(force: bool, show: bool) -> Result<(), String> {
     if !force {
         if let Some(value) = crate::nova::read_env_value(&existing, "APP_KEY") {
             if !value.is_empty() && value != PLACEHOLDER {
-                return Err(
-                    "APP_KEY is already set in .env.\n  \
+                return Err("APP_KEY is already set in .env.\n  \
                      Re-run with --force to replace it — every existing cookie, \
                      session and signed URL becomes invalid."
-                        .to_string(),
-                );
+                    .to_string());
             }
         }
     }
@@ -258,7 +259,10 @@ pub fn run_generate_key(force: bool, show: bool) -> Result<(), String> {
 
     println!();
     println!("  \x1b[32mGenerated APP_KEY\x1b[0m");
-    println!("  APP_KEY = [redacted — written to .env, {} chars]", key.chars().count());
+    println!(
+        "  APP_KEY = [redacted — written to .env, {} chars]",
+        key.chars().count()
+    );
     println!();
     println!("  Move it to a secrets manager before deploying.");
     println!();
@@ -312,7 +316,10 @@ pub fn app_declares_command_in(root: &std::path::Path, name: &str) -> bool {
     if !root.join("package.json").exists() {
         return false;
     }
-    let needles = [format!("commandName = \"{name}\""), format!("commandName = '{name}'")];
+    let needles = [
+        format!("commandName = \"{name}\""),
+        format!("commandName = '{name}'"),
+    ];
 
     // `commands/` is the usual home, but its absence says nothing about
     // `reamrc.commands` — returning early here made rc-declared commands
@@ -336,7 +343,8 @@ pub fn app_declares_command_in(root: &std::path::Path, name: &str) -> bool {
 fn scan_for_alias(dir: &std::path::Path, name: &str) -> bool {
     let quoted = [format!("\"{name}\""), format!("'{name}'")];
     scan_files(dir, &|text: &str| {
-        list_after(text, "aliases").is_some_and(|list| quoted.iter().any(|q| list.contains(q.as_str())))
+        list_after(text, "aliases")
+            .is_some_and(|list| quoted.iter().any(|q| list.contains(q.as_str())))
     })
 }
 
@@ -349,9 +357,13 @@ fn rc_declared_alias(root: &std::path::Path, name: &str) -> bool {
         return false;
     };
     // Keys may be bare, single- or double-quoted.
-    [format!("{name}:"), format!("\"{name}\":"), format!("'{name}':")]
-        .iter()
-        .any(|key| block.contains(key.as_str()))
+    [
+        format!("{name}:"),
+        format!("\"{name}\":"),
+        format!("'{name}':"),
+    ]
+    .iter()
+    .any(|key| block.contains(key.as_str()))
 }
 
 /// The `[ ... ]` following `marker`, if any.
@@ -550,7 +562,11 @@ fn warn_app_commands(reason: &str) {
 /// Ace prints a single list; splitting "framework" from "app" would make the
 /// user care about which side implements what. App commands are read as JSON so
 /// they can be merged rather than appended.
-pub fn run_list(framework: &[ListEntry], as_json: bool, namespaces: &[String]) -> Result<(), String> {
+pub fn run_list(
+    framework: &[ListEntry],
+    as_json: bool,
+    namespaces: &[String],
+) -> Result<(), String> {
     let app_entries = if std::path::Path::new("package.json").exists() {
         app_commands()
     } else {
@@ -574,7 +590,8 @@ pub fn run_list(framework: &[ListEntry], as_json: bool, namespaces: &[String]) -
     // absence, which belongs to the human listing, not to a machine-read
     // description.
     if as_json {
-        let payload: Vec<&serde_json::Value> = entries.iter().map(|entry| &entry.metadata).collect();
+        let payload: Vec<&serde_json::Value> =
+            entries.iter().map(|entry| &entry.metadata).collect();
         println!(
             "{}",
             serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?
@@ -588,7 +605,11 @@ pub fn run_list(framework: &[ListEntry], as_json: bool, namespaces: &[String]) -
         }
     }
 
-    let width = entries.iter().map(|entry| entry.name.len()).max().unwrap_or(0);
+    let width = entries
+        .iter()
+        .map(|entry| entry.name.len())
+        .max()
+        .unwrap_or(0);
     let mut current_group: Option<String> = None;
 
     println!();
@@ -611,7 +632,12 @@ pub fn run_list(framework: &[ListEntry], as_json: bool, namespaces: &[String]) -
             );
             current_group = Some(group);
         }
-        println!("  {:width$}  {}", entry.name, entry.description, width = width);
+        println!(
+            "  {:width$}  {}",
+            entry.name,
+            entry.description,
+            width = width
+        );
     }
     println!();
 
@@ -654,7 +680,11 @@ fn merge_entries(
     // Sort by (namespace, name) — sorting on the name alone interleaves the
     // groups, so a heading would be reprinted every time the alphabet crosses
     // back out of a namespace.
-    entries.sort_by(|a, b| group_of(&a.name).cmp(&group_of(&b.name)).then(a.name.cmp(&b.name)));
+    entries.sort_by(|a, b| {
+        group_of(&a.name)
+            .cmp(&group_of(&b.name))
+            .then(a.name.cmp(&b.name))
+    });
 
     Ok(entries)
 }
@@ -1052,7 +1082,9 @@ pub fn run_tests(
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
     if !std::path::Path::new("reamrc.ts").exists() {
-        return Err("reamrc.ts not found — `ream test` reads its suites from the rc file".to_string());
+        return Err(
+            "reamrc.ts not found — `ream test` reads its suites from the rc file".to_string(),
+        );
     }
 
     let options = test_options(suites, threads, reporters, bail);
@@ -1089,7 +1121,10 @@ pub fn run_tests(
     )?;
 
     if !status.success() {
-        return Err(format!("Tests failed with code {}", status.code().unwrap_or(-1)));
+        return Err(format!(
+            "Tests failed with code {}",
+            status.code().unwrap_or(-1)
+        ));
     }
 
     Ok(())
@@ -1160,13 +1195,19 @@ mod tests {
     fn app_entries_shadow_the_built_in_of_the_same_name() {
         let merged = merge_entries(
             vec![entry("start", "The app's own start")],
-            &[entry("start", "Built-in start"), entry("dev", "Run the dev server")],
+            &[
+                entry("start", "Built-in start"),
+                entry("dev", "Run the dev server"),
+            ],
             &[],
         )
         .expect("no namespace filter");
 
         assert_eq!(merged.len(), 2);
-        let start = merged.iter().find(|e| e.name == "start").expect("start is listed");
+        let start = merged
+            .iter()
+            .find(|e| e.name == "start")
+            .expect("start is listed");
         assert_eq!(start.description, "The app's own start");
     }
 
@@ -1174,7 +1215,10 @@ mod tests {
     fn the_kernels_own_list_does_not_shadow_the_built_in() {
         let merged = merge_entries(
             vec![entry("list", "List all the available commands")],
-            &[entry("list", "List every command available here"), entry("dev", "Dev server")],
+            &[
+                entry("list", "List every command available here"),
+                entry("dev", "Dev server"),
+            ],
             &[],
         )
         .expect("no namespace filter");
@@ -1183,7 +1227,10 @@ mod tests {
         assert_eq!(listed, vec!["dev", "list"]);
         // The binary's own description survives — the app's kernel exposes the
         // same command, it does not override it.
-        let list = merged.iter().find(|e| e.name == "list").expect("list is listed");
+        let list = merged
+            .iter()
+            .find(|e| e.name == "list")
+            .expect("list is listed");
         assert_eq!(list.description, "List every command available here");
     }
 
@@ -1202,9 +1249,16 @@ mod tests {
 
     #[test]
     fn rejects_a_namespace_nothing_matches() {
-        let error = merge_entries(Vec::new(), &[entry("dev", "Dev server")], &["mak".to_string()])
-            .expect_err("no command lives in \"mak\"");
-        assert!(error.contains("mak"), "the message must name the namespace: {error}");
+        let error = merge_entries(
+            Vec::new(),
+            &[entry("dev", "Dev server")],
+            &["mak".to_string()],
+        )
+        .expect_err("no command lives in \"mak\"");
+        assert!(
+            error.contains("mak"),
+            "the message must name the namespace: {error}"
+        );
     }
 
     #[test]
@@ -1242,8 +1296,16 @@ mod tests {
         // Round-trips as data...
         assert_eq!(options["suites"][0], serde_json::Value::String(hostile));
         // ...and every literal-terminating character is escaped on the way out.
-        assert!(rendered.contains("\\\""), "the quote is escaped: {}", rendered);
-        assert!(rendered.contains("\\n"), "the newline is escaped: {}", rendered);
+        assert!(
+            rendered.contains("\\\""),
+            "the quote is escaped: {}",
+            rendered
+        );
+        assert!(
+            rendered.contains("\\n"),
+            "the newline is escaped: {}",
+            rendered
+        );
         assert!(!rendered.contains('\n'), "no raw newline survives");
     }
 
@@ -1265,7 +1327,13 @@ mod tests {
     fn workers_are_spawned_with_the_swc_loader_not_input_type() {
         let options = test_options(&[], None, None, false);
         let args = options["nodeArgs"].as_array().expect("nodeArgs is a list");
-        assert_eq!(args, &serde_json::json!(["--import", "@swc-node/register/esm-register"]).as_array().unwrap().clone());
+        assert_eq!(
+            args,
+            &serde_json::json!(["--import", "@swc-node/register/esm-register"])
+                .as_array()
+                .unwrap()
+                .clone()
+        );
         // `--input-type=module` belongs to the `-e` parent only: a worker gets a
         // FILE, and Node rejects the flag there.
         assert!(!options["nodeArgs"].to_string().contains("input-type"));
@@ -1286,9 +1354,15 @@ mod tests {
         )
         .unwrap();
 
-        assert!(app_declares_command_in(&dir, "start"), "static aliases must count");
+        assert!(
+            app_declares_command_in(&dir, "start"),
+            "static aliases must count"
+        );
         assert!(app_declares_command_in(&dir, "up"), "every alias counts");
-        assert!(app_declares_command_in(&dir, "app:start"), "the name still counts");
+        assert!(
+            app_declares_command_in(&dir, "app:start"),
+            "the name still counts"
+        );
         // A word appearing in prose must not be mistaken for a declaration.
         assert!(!app_declares_command_in(&dir, "build"));
 
@@ -1321,10 +1395,7 @@ mod tests {
     /// whose commands live only in the rc file could never override a built-in.
     #[test]
     fn rc_declared_commands_are_found_without_a_commands_directory() {
-        let dir = std::env::temp_dir().join(format!(
-            "ream-rc-scan-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("ream-rc-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("app/console")).unwrap();
         std::fs::write(dir.join("package.json"), "{}").unwrap();
@@ -1343,8 +1414,14 @@ mod tests {
         let absent = app_declares_command_in(&dir, "nope");
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert!(found, "a command declared in reamrc.commands must be detected");
-        assert!(!absent, "an undeclared name must not be reported as declared");
+        assert!(
+            found,
+            "a command declared in reamrc.commands must be detected"
+        );
+        assert!(
+            !absent,
+            "an undeclared name must not be reported as declared"
+        );
     }
 
     /// Every `container.resolve(...)` inside the inline JS scripts must be

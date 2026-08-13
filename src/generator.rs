@@ -959,13 +959,22 @@ mod generator_conventions {
 
         let (path, content) = generate_event("orderShipped");
         assert_eq!(path, "app/events/order_shipped.ts");
-        assert!(content.contains("class OrderShipped extends BaseEvent"), "{content}");
-        assert!(!content.contains("OrderShippedEvent"), "no Event suffix: {content}");
+        assert!(
+            content.contains("class OrderShipped extends BaseEvent"),
+            "{content}"
+        );
+        assert!(
+            !content.contains("OrderShippedEvent"),
+            "no Event suffix: {content}"
+        );
 
         let (path, content) = generate_listener("sendMail", None);
         assert_eq!(path, "app/listeners/send_mail.ts");
         assert!(content.contains("class SendMail"), "{content}");
-        assert!(!content.contains("SendMailListener"), "no Listener suffix: {content}");
+        assert!(
+            !content.contains("SendMailListener"),
+            "no Listener suffix: {content}"
+        );
     }
 
     /// `--stack` picks the registration hint, `--event` types the handler.
@@ -978,8 +987,14 @@ mod generator_conventions {
 
         let (_, listener) = generate_listener("sendMail", Some("orderShipped"));
         assert!(listener.contains("import type OrderShipped"), "{listener}");
-        assert!(listener.contains("handle(event: OrderShipped)"), "{listener}");
-        assert!(listener.contains("emitter.on(OrderShipped, SendMail)"), "{listener}");
+        assert!(
+            listener.contains("handle(event: OrderShipped)"),
+            "{listener}"
+        );
+        assert!(
+            listener.contains("emitter.on(OrderShipped, SendMail)"),
+            "{listener}"
+        );
     }
 
     /// A namespaced command name is a valid COMMAND name but not a valid class
@@ -993,7 +1008,10 @@ mod generator_conventions {
         let (path, content) = generate_command("app:provision");
         assert_eq!(path, "commands/app-provision.ts");
         assert!(content.contains("class AppProvision"), "{content}");
-        assert!(content.contains("commandName = 'app:provision'"), "{content}");
+        assert!(
+            content.contains("commandName = 'app:provision'"),
+            "{content}"
+        );
     }
 }
 
