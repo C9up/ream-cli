@@ -71,6 +71,11 @@ pub fn run(name: &str) -> Result<(), String> {
     write_file(root, "env.ts", &env_typing(database))?;
     write_file(root, ".gitignore", GITIGNORE)?;
     write_file(root, "reamrc.ts", &reamrc(template))?;
+    // Console entry. The microservice template runs a standalone bin/server.ts
+    // with no Ignitor or rc file, so it has no console kernel to reach.
+    if template != "microservice" {
+        write_file(root, "bin/console.ts", CONSOLE_ENTRY)?;
+    }
 
     // Template-specific files
     match template {
@@ -162,6 +167,32 @@ fn write_file(root: &Path, path: &str, content: &str) -> Result<(), String> {
     println!("  \x1b[32mcreated\x1b[0m {}/{}", root.display(), path);
     Ok(())
 }
+
+/// The console entry — Ream's `ace` equivalent.
+///
+/// `ream <command>` dispatches here, so a project has a working command line
+/// from the first commit instead of growing throwaway `tsx bin/*.ts` scripts.
+/// Commands live in `commands/` and are discovered automatically; generate one
+/// with `ream make:command <name>`.
+const CONSOLE_ENTRY: &str = r##"import 'reflect-metadata'
+import { Ignitor, prettyPrintError } from '@c9up/ream'
+
+const APP_ROOT = new URL('../', import.meta.url)
+
+const IMPORTER = (filePath: string) =>
+  filePath.startsWith('./') || filePath.startsWith('../')
+    ? import(new URL(filePath, APP_ROOT).href)
+    : import(filePath)
+
+new Ignitor(APP_ROOT, { importer: IMPORTER })
+  .useRcFile((await import('../reamrc.js')).default)
+  .console()
+  .handle(process.argv.slice(2))
+  .catch((err) => {
+    prettyPrintError(err)
+    process.exit(1)
+  })
+"##;
 
 fn package_json(name: &str, template: &str) -> String {
     // Current framework baseline. `^0.1.0` would misrepresent the released

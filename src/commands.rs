@@ -130,6 +130,635 @@ pub fn run_migration(action: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `repl` — an interactive shell with the application booted.
+///
+/// Boots in console mode (providers + container, no HTTP server) and hands the
+/// container to a Node REPL. `app`, `container` and `resolve(token)` are in
+/// scope, so a service can be poked at without writing a throwaway script —
+/// which is the habit this whole CLI exists to remove.
+pub fn run_repl() -> Result<(), String> {
+    if !std::path::Path::new("package.json").exists() {
+        return Err("Not in a Ream project (no package.json found)".to_string());
+    }
+    if !std::path::Path::new("reamrc.ts").exists() {
+        return Err("reamrc.ts not found — `ream repl` boots the app from the rc file".to_string());
+    }
+
+    let script = r#"
+        import 'reflect-metadata';
+        import repl from 'node:repl';
+        import { Ignitor, prettyPrintError } from '@c9up/ream';
+
+        const rc = (await import('./reamrc.ts')).default;
+        const ignitor = await new Ignitor(new URL('./', import.meta.url))
+            .useRcFile(rc)
+            .setEnvironment('console')
+            .start();
+        const app = ignitor.getApp();
+
+        process.stdout.write('\n  Ream REPL — `app`, `container`, `await resolve(token)`\n');
+        process.stdout.write('  .exit or Ctrl-D to leave\n\n');
+
+        const server = repl.start({ prompt: 'ream > ' });
+        server.context.app = app;
+        server.context.container = app.container;
+        // `container.resolve` is async (Adonis fold parity) — without awaiting it
+        // you get a Promise, and every property reads undefined. The inner
+        // await is redundant for the caller (who awaits too) but keeps the
+        // guard in `generated_scripts_await_every_container_resolve` honest.
+        server.context.resolve = async (token) => await app.container.resolve(token);
+
+        server.on('exit', async () => {
+            try {
+                await ignitor.stop();
+            } catch (err) {
+                prettyPrintError(err);
+            }
+            // App-owned handles (a DB pool, a redis client) keep the loop alive.
+            process.exit(0);
+        });
+    "#;
+
+    let status = inherited_status(
+        "node",
+        &[
+            "--import",
+            "@swc-node/register/esm-register",
+            "--input-type=module",
+            "-e",
+            script,
+        ],
+    )?;
+
+    if !status.success() {
+        return Err(format!("repl exited with code {}", status.code().unwrap_or(-1)));
+    }
+    Ok(())
+}
+
+/// `generate:key` — write a fresh APP_KEY into `.env`.
+///
+/// A scaffolded project ships a placeholder; leaving it in place means cookies,
+/// sessions and CSRF tokens are signed with a value that is public knowledge.
+///
+/// Generation is delegated to Node's `crypto` (as `nova:vapid:generate` does)
+/// rather than pulled in as a Rust crypto dependency for one 32-byte draw. The
+/// key is never printed: stdout ends up in shell history, scrollback and CI
+/// logs — the `.env` write is the only sink.
+pub fn run_generate_key(force: bool, show: bool) -> Result<(), String> {
+    if !std::path::Path::new("package.json").exists() {
+        return Err("Not in a Ream project (no package.json found)".to_string());
+    }
+
+    // `--show` prints the key and writes nothing — the way to obtain one for a
+    // secrets manager without touching the local .env.
+    if show {
+        println!("{}", generate_app_key()?);
+        return Ok(());
+    }
+
+    // Adonis guards production: rewriting APP_KEY there invalidates every
+    // session and signed URL in circulation, and a deployed .env is usually not
+    // the source of truth anyway.
+    let in_production = std::env::var("NODE_ENV").is_ok_and(|env| env == "production");
+    if in_production && !force {
+        return Err(
+            "Refusing to write .env in production — every existing session, cookie and \
+             signed URL would be invalidated.\n  \
+             Use --show to print a key for your secrets manager, or --force to write anyway."
+                .to_string(),
+        );
+    }
+
+    let env_path = std::path::Path::new(".env");
+    let existing = if env_path.exists() {
+        std::fs::read_to_string(env_path).map_err(|e| format!("Failed to read .env: {}", e))?
+    } else {
+        String::new()
+    };
+
+    // The scaffold's placeholder is not a real key, so it must not block.
+    const PLACEHOLDER: &str = "change-me-to-a-unique-32+-byte-secret!!";
+    if !force {
+        if let Some(value) = crate::nova::read_env_value(&existing, "APP_KEY") {
+            if !value.is_empty() && value != PLACEHOLDER {
+                return Err(
+                    "APP_KEY is already set in .env.\n  \
+                     Re-run with --force to replace it — every existing cookie, \
+                     session and signed URL becomes invalid."
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    let key = generate_app_key()?;
+    let updated = crate::nova::upsert_env_var(&existing, "APP_KEY", &key);
+    std::fs::write(env_path, updated).map_err(|e| format!("Failed to write .env: {}", e))?;
+
+    println!();
+    println!("  \x1b[32mGenerated APP_KEY\x1b[0m");
+    println!("  APP_KEY = [redacted — written to .env, {} chars]", key.chars().count());
+    println!();
+    println!("  Move it to a secrets manager before deploying.");
+    println!();
+    Ok(())
+}
+
+/// 32 random bytes, base64url — same shape AdonisJS generates.
+fn generate_app_key() -> Result<String, String> {
+    let output = Command::new("node")
+        .args([
+            "--input-type=module",
+            "-e",
+            "import { randomBytes } from 'node:crypto'; process.stdout.write(randomBytes(32).toString('base64url'));",
+        ])
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("Failed to run node: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Key generation failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let key = String::from_utf8(output.stdout)
+        .map_err(|e| format!("Key generation produced invalid output: {}", e))?;
+    if key.trim().is_empty() {
+        return Err("Key generation produced an empty key".to_string());
+    }
+    Ok(key.trim().to_string())
+}
+
+/// Does the application declare a command by this name?
+///
+/// Answered by scanning `commands/` for a `commandName` literal rather than by
+/// booting Node: this runs before every native command, and paying a boot to
+/// find out would make the whole CLI slow.
+///
+/// The trade-off is explicit: a command whose name is computed at runtime is
+/// invisible here, and the native command wins. Declaring it as a literal —
+/// which `ream make:command` always does — is what makes the override work.
+pub fn app_declares_command(name: &str) -> bool {
+    app_declares_command_in(std::path::Path::new("."), name)
+}
+
+/// Root-relative form — the whole of `app_declares_command`, with the project
+/// directory passed in so it can be exercised without touching the process's
+/// current directory (Rust runs tests in threads; changing it breaks the others).
+pub fn app_declares_command_in(root: &std::path::Path, name: &str) -> bool {
+    if !root.join("package.json").exists() {
+        return false;
+    }
+    let needles = [format!("commandName = \"{name}\""), format!("commandName = '{name}'")];
+
+    // `commands/` is the usual home, but its absence says nothing about
+    // `reamrc.commands` — returning early here made rc-declared commands
+    // undetectable in any project without that directory.
+    let dir = root.join("commands");
+    if dir.is_dir() && (scan_for(&dir, &needles) || scan_for_alias(&dir, name)) {
+        return true;
+    }
+
+    // Commands can also be declared in `reamrc.commands`. Local entries point at
+    // files we can read; entries resolving to a package cannot be inspected
+    // without booting, and are the documented blind spot of this approach.
+    rc_declared_commands(root, &needles) || rc_declared_alias(root, name)
+}
+
+/// Does any file under `dir` declare `name` in a `static aliases = [...]`?
+///
+/// A command answers to its aliases as much as to its name, so an app aliasing
+/// `start` overrides the built-in exactly as a command named `start` would —
+/// Ace resolves both through one registry.
+fn scan_for_alias(dir: &std::path::Path, name: &str) -> bool {
+    let quoted = [format!("\"{name}\""), format!("'{name}'")];
+    scan_files(dir, &|text: &str| {
+        list_after(text, "aliases").is_some_and(|list| quoted.iter().any(|q| list.contains(q.as_str())))
+    })
+}
+
+/// Does `reamrc.ts` map `name` through `commandsAliases`?
+fn rc_declared_alias(root: &std::path::Path, name: &str) -> bool {
+    let Ok(rc) = std::fs::read_to_string(root.join("reamrc.ts")) else {
+        return false;
+    };
+    let Some(block) = block_after(&rc, "commandsAliases") else {
+        return false;
+    };
+    // Keys may be bare, single- or double-quoted.
+    [format!("{name}:"), format!("\"{name}\":"), format!("'{name}':")]
+        .iter()
+        .any(|key| block.contains(key.as_str()))
+}
+
+/// The `[ ... ]` following `marker`, if any.
+fn list_after(text: &str, marker: &str) -> Option<String> {
+    let start = text.find(marker)? + marker.len();
+    let open = text[start..].find('[')? + start;
+    let close = text[open..].find(']')? + open;
+    Some(text[open..=close].to_string())
+}
+
+/// The `{ ... }` following `marker`, if any.
+fn block_after(text: &str, marker: &str) -> Option<String> {
+    let start = text.find(marker)? + marker.len();
+    let open = text[start..].find('{')? + start;
+    let close = text[open..].find('}')? + open;
+    Some(text[open..=close].to_string())
+}
+
+/// Scan the files referenced by relative imports in `reamrc.commands`.
+fn rc_declared_commands(root: &std::path::Path, needles: &[String]) -> bool {
+    let Ok(rc) = std::fs::read_to_string(root.join("reamrc.ts")) else {
+        return false;
+    };
+
+    for candidate in rc.split("import(").skip(1) {
+        let Some(quote) = candidate.chars().find(|c| *c == '\'' || *c == '"') else {
+            continue;
+        };
+        let Some(rest) = candidate.split_once(quote) else {
+            continue;
+        };
+        let Some((path, _)) = rest.1.split_once(quote) else {
+            continue;
+        };
+        if !path.starts_with("./") && !path.starts_with("../") {
+            continue; // a package — not readable from here
+        }
+        // The rc file imports the built `.js`; the source next to it is `.ts`.
+        for candidate_path in [path.to_string(), path.replace(".js", ".ts")] {
+            let Ok(text) = std::fs::read_to_string(root.join(&candidate_path)) else {
+                continue;
+            };
+            if needles.iter().any(|needle| text.contains(needle.as_str())) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Does any source file under `dir` satisfy `matches`?
+///
+/// Recursive, depth-capped: `commands/` is a flat convention, and an unbounded
+/// walk would follow whatever happens to live under it.
+fn scan_files(dir: &std::path::Path, matches: &dyn Fn(&str) -> bool) -> bool {
+    fn walk(dir: &std::path::Path, matches: &dyn Fn(&str) -> bool, depth: usize) -> bool {
+        if depth > 4 {
+            return false;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if walk(&path, matches, depth + 1) {
+                    return true;
+                }
+                continue;
+            }
+            let is_source = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| matches!(ext, "ts" | "js" | "mts" | "mjs"));
+            if !is_source {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if matches(&text) {
+                return true;
+            }
+        }
+        false
+    }
+    walk(dir, matches, 0)
+}
+
+/// Does any source file under `dir` contain one of `needles`?
+fn scan_for(dir: &std::path::Path, needles: &[String]) -> bool {
+    scan_files(dir, &|text: &str| {
+        needles.iter().any(|needle| text.contains(needle.as_str()))
+    })
+}
+
+/// Dispatch a command to the app's console kernel — the `node ace <cmd>`
+/// equivalent, and the reason this binary accepts names it does not define.
+///
+/// Prefers the app's `bin/console.ts` entry when it exists: an app may wire a
+/// custom importer, path aliases or preloads there, and re-implementing that
+/// here would drift. Falls back to an inline boot for projects scaffolded
+/// before the entry existed, so `ream <cmd>` works without touching the app.
+pub fn run_console(argv: &[String]) -> Result<(), String> {
+    if !std::path::Path::new("package.json").exists() {
+        return Err("Not in a Ream project (no package.json found)".to_string());
+    }
+
+    let status = if std::path::Path::new("bin/console.ts").exists() {
+        let mut args: Vec<&str> = vec![
+            "--import",
+            "@swc-node/register/esm-register",
+            "bin/console.ts",
+        ];
+        args.extend(argv.iter().map(String::as_str));
+        inherited_status("node", &args)?
+    } else {
+        if !std::path::Path::new("reamrc.ts").exists() {
+            return Err(
+                "No bin/console.ts and no reamrc.ts — cannot reach the app's console kernel.\n  \
+                 Run 'ream new' for a project with a console entry, or add bin/console.ts."
+                    .to_string(),
+            );
+        }
+        let script = console_script(argv);
+        inherited_status(
+            "node",
+            &[
+                "--import",
+                "@swc-node/register/esm-register",
+                "--input-type=module",
+                "-e",
+                &script,
+            ],
+        )?
+    };
+
+    if !status.success() {
+        // The kernel already reported what went wrong; propagate its code
+        // rather than wrapping it in a second, less informative error.
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    Ok(())
+}
+
+/// The inline console boot, used when the app has no `bin/console.ts`.
+///
+/// argv goes through serde, not string concatenation: a command name comes from
+/// the shell, and interpolating it raw would let it break out into executable
+/// code. Same reasoning as `test_options`.
+fn console_script(argv: &[String]) -> String {
+    format!(
+        r#"
+        import 'reflect-metadata';
+        import {{ Ignitor, prettyPrintError }} from '@c9up/ream';
+        const rc = (await import('./reamrc.ts')).default;
+        try {{
+            await new Ignitor(new URL('./', import.meta.url))
+                .useRcFile(rc)
+                .console()
+                .handle({});
+        }} catch (err) {{
+            prettyPrintError(err);
+            process.exitCode = 1;
+        }}
+        // Force-exit: app-owned handles (a DB pool, a redis client built when
+        // config loads) keep the event loop alive, and a one-shot command must
+        // not hang. Same guard as run_migration.
+        process.exit(process.exitCode ?? 0);
+    "#,
+        serde_json::json!(argv)
+    )
+}
+
+/// One line of `ream list`.
+///
+/// `name` and `description` drive the grouped human listing; `metadata` is the
+/// full Ace command contract, which is what `--json` prints. Both are carried
+/// together so the two outputs cannot describe different sets of commands.
+#[derive(Clone, Debug)]
+pub struct ListEntry {
+    pub name: String,
+    pub description: String,
+    pub metadata: serde_json::Value,
+}
+
+/// Report why the app's commands are missing from `ream list`, on stderr so the
+/// list itself stays pipeable.
+fn warn_app_commands(reason: &str) {
+    eprintln!("warning: this project's own commands are not listed — {reason}");
+}
+
+/// `ream list` — one list covering this binary's commands and the app's own.
+///
+/// Ace prints a single list; splitting "framework" from "app" would make the
+/// user care about which side implements what. App commands are read as JSON so
+/// they can be merged rather than appended.
+pub fn run_list(framework: &[ListEntry], as_json: bool, namespaces: &[String]) -> Result<(), String> {
+    let app_entries = if std::path::Path::new("package.json").exists() {
+        app_commands()
+    } else {
+        Vec::new()
+    };
+
+    // On a name collision the APP wins at run time, so the listing has to show
+    // the app's entry — printing the built-in description for a command the app
+    // actually handles is worse than not listing it at all. Marked, because a
+    // shadowed built-in is worth knowing about.
+    let app_names: std::collections::HashSet<String> =
+        app_entries.iter().map(|entry| entry.name.clone()).collect();
+    let framework_names: std::collections::HashSet<&str> =
+        framework.iter().map(|entry| entry.name.as_str()).collect();
+
+    let mut entries = merge_entries(app_entries, framework, namespaces)?;
+
+    // The TS kernel answers `list --json`; the binary has to as well, or the
+    // same command means different things depending on how it is reached. The
+    // metadata is passed through untouched — including the override marker's
+    // absence, which belongs to the human listing, not to a machine-read
+    // description.
+    if as_json {
+        let payload: Vec<&serde_json::Value> = entries.iter().map(|entry| &entry.metadata).collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+
+    for entry in entries.iter_mut() {
+        if app_names.contains(&entry.name) && framework_names.contains(entry.name.as_str()) {
+            entry.description = format!("{}  (overrides the built-in command)", entry.description);
+        }
+    }
+
+    let width = entries.iter().map(|entry| entry.name.len()).max().unwrap_or(0);
+    let mut current_group: Option<String> = None;
+
+    println!();
+    println!("Usage: ream <command> [options]");
+    println!();
+
+    for entry in &entries {
+        let group = group_of(&entry.name);
+        if current_group.as_ref() != Some(&group) {
+            if current_group.is_some() {
+                println!();
+            }
+            println!(
+                "{}",
+                if group.is_empty() {
+                    "Available commands"
+                } else {
+                    group.as_str()
+                }
+            );
+            current_group = Some(group);
+        }
+        println!("  {:width$}  {}", entry.name, entry.description, width = width);
+    }
+    println!();
+
+    Ok(())
+}
+
+/// The single list `ream list` prints: the app's commands, then the binary's,
+/// deduplicated, optionally narrowed to some namespaces, and grouped.
+fn merge_entries(
+    app: Vec<ListEntry>,
+    framework: &[ListEntry],
+    namespaces: &[String],
+) -> Result<Vec<ListEntry>, String> {
+    // App entries first: the dedup keeps the first of each name, and the app is
+    // what runs.
+    let mut entries = app;
+
+    // Except `list`: the console kernel registers its own (Ace does too, so
+    // that `bin/console.ts list` works), but here it is the SAME command this
+    // binary is already running — keeping the app's copy would mark the
+    // built-in as shadowed, which is not what happens at dispatch.
+    entries.retain(|entry| entry.name != "list");
+    entries.extend(framework.iter().cloned());
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    entries.retain(|entry| seen.insert(entry.name.clone()));
+
+    if !namespaces.is_empty() {
+        entries.retain(|entry| namespaces.contains(&group_of(&entry.name)));
+        // A namespace nobody matches is almost always a typo, and an empty list
+        // reads as "this namespace is empty" instead of "no such namespace".
+        if entries.is_empty() {
+            return Err(format!(
+                "No command in namespace \"{}\".",
+                namespaces.join("\", \"")
+            ));
+        }
+    }
+
+    // Sort by (namespace, name) — sorting on the name alone interleaves the
+    // groups, so a heading would be reprinted every time the alphabet crosses
+    // back out of a namespace.
+    entries.sort_by(|a, b| group_of(&a.name).cmp(&group_of(&b.name)).then(a.name.cmp(&b.name)));
+
+    Ok(entries)
+}
+
+/// The namespace of a command name: `make:entity` → `make`, `dev` → `` .
+/// Ungrouped commands sort first because the empty string precedes everything.
+fn group_of(name: &str) -> String {
+    name.split_once(':')
+        .map(|(prefix, _)| prefix.to_string())
+        .unwrap_or_default()
+}
+
+/// Ask the app's console kernel for its commands.
+///
+/// The framework commands must still be listed when the app cannot answer, so a
+/// failure here is not fatal — but it IS reported. Swallowing it silently means
+/// a command missing because of a broken import looks like a command that was
+/// never written.
+fn app_commands() -> Vec<ListEntry> {
+    let output = if std::path::Path::new("bin/console.ts").exists() {
+        Command::new("node")
+            .args([
+                "--import",
+                "@swc-node/register/esm-register",
+                "bin/console.ts",
+                "list",
+                "--json",
+            ])
+            .stderr(Stdio::piped())
+            .output()
+    } else if std::path::Path::new("reamrc.ts").exists() {
+        Command::new("node")
+            .args([
+                "--import",
+                "@swc-node/register/esm-register",
+                "--input-type=module",
+                "-e",
+                &console_script(&["list".to_string(), "--json".to_string()]),
+            ])
+            .stderr(Stdio::piped())
+            .output()
+    } else {
+        return Vec::new();
+    };
+
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => {
+            warn_app_commands(&format!("could not run the console entry: {err}"));
+            return Vec::new();
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        warn_app_commands(if detail.is_empty() {
+            "the console entry exited with an error"
+        } else {
+            detail
+        });
+        return Vec::new();
+    }
+
+    let Ok(text) = String::from_utf8(output.stdout) else {
+        warn_app_commands("the console entry produced non-UTF-8 output");
+        return Vec::new();
+    };
+    match parse_command_list(&text) {
+        Ok(entries) => entries,
+        Err(err) => {
+            warn_app_commands(&err);
+            Vec::new()
+        }
+    }
+}
+
+/// Read the kernel's `list --json` payload.
+///
+/// Kept apart from the process plumbing so the field names stay under test: the
+/// kernel publishes Ace's metadata contract, whose key is `commandName`, and a
+/// silent mismatch here drops every one of the app's commands from the listing.
+fn parse_command_list(text: &str) -> Result<Vec<ListEntry>, String> {
+    let parsed = serde_json::from_str::<Vec<serde_json::Value>>(text.trim())
+        .map_err(|err| format!("could not read the command list ({err})"))?;
+
+    Ok(parsed
+        .into_iter()
+        .filter_map(|metadata| {
+            let name = metadata.get("commandName")?.as_str()?.to_string();
+            let description = metadata
+                .get("description")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            Some(ListEntry {
+                name,
+                description,
+                metadata,
+            })
+        })
+        .collect())
+}
+
 /// Inspect: list registered routes, providers, and decorated services.
 /// Boots the app in console mode and dumps an introspection summary to stdout.
 pub fn run_inspect() -> Result<(), String> {
@@ -498,6 +1127,86 @@ fn test_options(
 mod tests {
     use super::*;
 
+    fn entry(name: &str, description: &str) -> ListEntry {
+        ListEntry {
+            name: name.to_string(),
+            description: description.to_string(),
+            metadata: serde_json::json!({ "commandName": name, "description": description }),
+        }
+    }
+
+    #[test]
+    fn reads_the_kernel_metadata_key_not_a_summary_field() {
+        // The kernel publishes Ace's contract, keyed on `commandName`. Reading
+        // `name` here silently dropped every one of the app's commands.
+        let entries = parse_command_list(
+            r#"[{ "commandName": "provision", "description": "Create the owner", "flags": [] }]"#,
+        )
+        .expect("the payload is valid JSON");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "provision");
+        assert_eq!(entries[0].description, "Create the owner");
+        // The metadata is passed through whole: `--json` prints it verbatim.
+        assert!(entries[0].metadata.get("flags").is_some());
+    }
+
+    #[test]
+    fn reports_a_payload_it_cannot_read() {
+        assert!(parse_command_list("not json").is_err());
+    }
+
+    #[test]
+    fn app_entries_shadow_the_built_in_of_the_same_name() {
+        let merged = merge_entries(
+            vec![entry("start", "The app's own start")],
+            &[entry("start", "Built-in start"), entry("dev", "Run the dev server")],
+            &[],
+        )
+        .expect("no namespace filter");
+
+        assert_eq!(merged.len(), 2);
+        let start = merged.iter().find(|e| e.name == "start").expect("start is listed");
+        assert_eq!(start.description, "The app's own start");
+    }
+
+    #[test]
+    fn the_kernels_own_list_does_not_shadow_the_built_in() {
+        let merged = merge_entries(
+            vec![entry("list", "List all the available commands")],
+            &[entry("list", "List every command available here"), entry("dev", "Dev server")],
+            &[],
+        )
+        .expect("no namespace filter");
+
+        let listed: Vec<&str> = merged.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(listed, vec!["dev", "list"]);
+        // The binary's own description survives — the app's kernel exposes the
+        // same command, it does not override it.
+        let list = merged.iter().find(|e| e.name == "list").expect("list is listed");
+        assert_eq!(list.description, "List every command available here");
+    }
+
+    #[test]
+    fn narrows_the_listing_to_the_requested_namespaces() {
+        let merged = merge_entries(
+            Vec::new(),
+            &[entry("make:entity", "Entity"), entry("dev", "Dev server")],
+            &["make".to_string()],
+        )
+        .expect("make matches");
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].name, "make:entity");
+    }
+
+    #[test]
+    fn rejects_a_namespace_nothing_matches() {
+        let error = merge_entries(Vec::new(), &[entry("dev", "Dev server")], &["mak".to_string()])
+            .expect_err("no command lives in \"mak\"");
+        assert!(error.contains("mak"), "the message must name the namespace: {error}");
+    }
+
     #[test]
     fn dev_uses_swc_node_not_tsx() {
         let args = dev_args();
@@ -560,6 +1269,82 @@ mod tests {
         // `--input-type=module` belongs to the `-e` parent only: a worker gets a
         // FILE, and Node rejects the flag there.
         assert!(!options["nodeArgs"].to_string().contains("input-type"));
+    }
+
+    /// An alias must override a built-in exactly as a command name does — Ace
+    /// resolves both through one registry, so `ream start` has to reach an app
+    /// command aliased to `start`, not the binary's own.
+    #[test]
+    fn aliases_count_as_a_declaration() {
+        let dir = std::env::temp_dir().join(format!("ream-alias-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("commands")).unwrap();
+        std::fs::write(dir.join("package.json"), "{}").unwrap();
+        std::fs::write(
+            dir.join("commands/app_start.ts"),
+            "export default class AppStart { static commandName = 'app:start'\n static aliases = ['start', 'up'] }\n",
+        )
+        .unwrap();
+
+        assert!(app_declares_command_in(&dir, "start"), "static aliases must count");
+        assert!(app_declares_command_in(&dir, "up"), "every alias counts");
+        assert!(app_declares_command_in(&dir, "app:start"), "the name still counts");
+        // A word appearing in prose must not be mistaken for a declaration.
+        assert!(!app_declares_command_in(&dir, "build"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Same for `commandsAliases` in the rc file.
+    #[test]
+    fn rc_command_aliases_count_as_a_declaration() {
+        let dir = std::env::temp_dir().join(format!("ream-rc-alias-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("package.json"), "{}").unwrap();
+        std::fs::write(
+            dir.join("reamrc.ts"),
+            "export default defineConfig({\n  commandsAliases: { start: 'app:start' },\n})\n",
+        )
+        .unwrap();
+
+        assert!(app_declares_command_in(&dir, "start"));
+        assert!(!app_declares_command_in(&dir, "test"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A command declared in `reamrc.commands` must be detectable even when the
+    /// project has no `commands/` directory at all.
+    ///
+    /// It did not: the lookup returned early on a missing directory, so an app
+    /// whose commands live only in the rc file could never override a built-in.
+    #[test]
+    fn rc_declared_commands_are_found_without_a_commands_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "ream-rc-scan-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app/console")).unwrap();
+        std::fs::write(dir.join("package.json"), "{}").unwrap();
+        std::fs::write(
+            dir.join("reamrc.ts"),
+            "export default defineConfig({\n  commands: [() => import('./app/console/deploy.js')],\n})\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("app/console/deploy.ts"),
+            "export default class Deploy { static commandName = 'start' }\n",
+        )
+        .unwrap();
+
+        let found = app_declares_command_in(&dir, "start");
+        let absent = app_declares_command_in(&dir, "nope");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(found, "a command declared in reamrc.commands must be detected");
+        assert!(!absent, "an undeclared name must not be reported as declared");
     }
 
     /// Every `container.resolve(...)` inside the inline JS scripts must be

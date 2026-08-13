@@ -183,11 +183,52 @@ pub fn make(
         "service" | "provider" | "migration" => {
             validate_name_relaxed(name, "name")?;
         }
+        "command" => {
+            validate_command_name(name)?;
+        }
         _ => {}
     }
 
     let entries = build_plan_entries(kind, module, name)?;
     flush_outcome(entries, dry_run, force)
+}
+
+/// Generators that take one extra option — `make:middleware --stack`,
+/// `make:listener --event`.
+///
+/// Kept apart from {@link make} rather than threading an `Option` through every
+/// generator: only these three take one, and widening the shared signature
+/// would touch a dozen call sites for nothing.
+pub fn make_with_option(
+    kind: &str,
+    name: &str,
+    option: Option<&str>,
+    dry_run: bool,
+    force: bool,
+) -> Result<(), String> {
+    validate_name_relaxed(name, "name")?;
+
+    let entry = match kind {
+        "middleware" => {
+            let stack = option.unwrap_or("router");
+            if !matches!(stack, "server" | "named" | "router") {
+                return Err(format!(
+                    "unknown --stack '{stack}' (expected: server, named, or router)"
+                ));
+            }
+            generate_middleware(name, stack)
+        }
+        "event" => generate_event(name),
+        "listener" => {
+            if let Some(event) = option {
+                validate_name_relaxed(event, "--event")?;
+            }
+            generate_listener(name, option)
+        }
+        other => return Err(format!("Unknown generator type: {other}")),
+    };
+
+    flush_outcome(vec![entry], dry_run, force)
 }
 
 /// `make:module` umbrella — emits entity + controller + migration + validator.
@@ -249,6 +290,19 @@ fn validate_name_relaxed(s: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Command names carry a namespace separator — `make:controller`,
+/// `app:provision`. Same rules as {@link validate_name_relaxed} otherwise, plus
+/// `:` in an inner position: a leading or trailing colon would produce an empty
+/// namespace or an empty name, and a doubled one an empty segment.
+fn validate_command_name(s: &str) -> Result<(), String> {
+    if s.starts_with(':') || s.ends_with(':') || s.contains("::") {
+        return Err(format!(
+            "name '{s}' has an empty namespace segment — use `namespace:name`"
+        ));
+    }
+    validate_name_relaxed(&s.replace(':', "-"), "name")
+}
+
 fn build_plan_entries(
     kind: &str,
     module: &str,
@@ -272,6 +326,7 @@ fn build_plan_entries(
             generate_validator(module, name)
         }
         "provider" => generate_provider(name),
+        "command" => generate_command(name),
         "migration" => generate_migration(name)?,
         "seeder" => {
             // Module is OPTIONAL for seeders — they live under
@@ -614,6 +669,161 @@ export default class {class_name} extends Provider {{
     (path, content)
 }
 
+/// `make:command` — a console command in the app's `commands/` directory.
+///
+/// That directory is auto-discovered by the console kernel, so the generated
+/// file is runnable as `ream <name>` with no registration step. `reamrc.ts`
+/// `commands[]` stays reserved for commands shipped by packages, which
+/// discovery cannot see.
+fn generate_command(name: &str) -> (String, String) {
+    // `app:provision` is a valid COMMAND name but neither a valid class name nor
+    // a valid file name: the namespace separator has to go before either is
+    // derived (`app:provision` -> `AppProvision`, `app-provision.ts`).
+    let file_name = name.replace(':', "-");
+    let class_name = to_pascal_case(&file_name);
+    let path = format!("commands/{file_name}.ts");
+    let content = format!(
+        r#"import {{ BaseCommand, flags }} from '@c9up/ream/ace'
+import type {{ CommandOptions }} from '@c9up/ream/ace'
+
+export default class {class_name} extends BaseCommand {{
+  static commandName = '{name}'
+  static description = 'TODO describe what this command does'
+
+  /**
+   * `startApp` boots providers and the container before `run()`. Off by
+   * default, as in Ace: a command that only touches the filesystem has no
+   * reason to open a database connection. Turn it on to reach `this.app`.
+   */
+  static options: CommandOptions = {{ startApp: false }}
+
+  @flags.boolean({{ description: 'Report what would happen without doing it' }})
+  declare dryRun: boolean
+
+  async run(): Promise<void> {{
+    if (this.dryRun) {{
+      this.logger.info('Dry run — nothing was changed.')
+      return
+    }}
+
+    this.logger.success('{name} ran.')
+  }}
+}}
+"#
+    );
+    (path, content)
+}
+
+/// `make:middleware` — an HTTP middleware class in `app/middleware/`.
+///
+/// Adonis's directory and snake_case file convention, which the scaffold
+/// already follows (`app/middleware/auth_middleware.ts`).
+fn generate_middleware(name: &str, stack: &str) -> (String, String) {
+    let base = to_snake_case(&strip_suffix_ci(name, "middleware"));
+    // Adonis documents the `Middleware` suffix for this one specifically
+    // ("names are singular with a 'middleware' suffix, e.g. BodyParserMiddleware").
+    let class_name = format!("{}Middleware", to_pascal_case(&base));
+    let path = format!("app/middleware/{base}_middleware.ts");
+    let registration = match stack {
+        "server" => "server.use([() => import('#middleware/{base}_middleware.js')])",
+        "named" => "router.named({{ {base}: () => import('#middleware/{base}_middleware.js') }})",
+        _ => "router.use([() => import('#middleware/{base}_middleware.js')])",
+    }
+    .replace("{base}", &base);
+    let content = format!(
+        r#"import type {{ HttpContext }} from '@c9up/ream'
+
+/**
+ * Register it in `start/kernel.ts`:
+ *   {registration}
+ */
+export default class {class_name} {{
+  async handle(ctx: HttpContext, next: () => Promise<void>) {{
+    // Runs before the route handler.
+    await next()
+    // Runs after it — the response is available here.
+  }}
+}}
+"#
+    );
+    (path, content)
+}
+
+/// `make:event` — a typed event class in `app/events/`.
+fn generate_event(name: &str) -> (String, String) {
+    // No suffix: Adonis generates `make:event orderShipped` as `OrderShipped`,
+    // unlike middleware, where it documents one.
+    let base = to_snake_case(name);
+    let class_name = to_pascal_case(&base);
+    let path = format!("app/events/{base}.ts");
+    let content = format!(
+        r#"import {{ BaseEvent }} from '@c9up/ream/events'
+
+export default class {class_name} extends BaseEvent {{
+  /** Name listeners subscribe to. Defaults to the class name when omitted. */
+  static eventName = '{base}'
+
+  constructor(public payload: Record<string, unknown>) {{
+    super()
+  }}
+}}
+"#
+    );
+    (path, content)
+}
+
+/// `make:listener` — an event listener class in `app/listeners/`.
+fn generate_listener(name: &str, event: Option<&str>) -> (String, String) {
+    let base = to_snake_case(name);
+    let class_name = to_pascal_case(&base);
+    let path = format!("app/listeners/{base}.ts");
+
+    // `--event` binds the listener to a generated event class, as Adonis does.
+    let (import_line, event_type, registration) = match event {
+        Some(event_name) => {
+            let event_base = to_snake_case(event_name);
+            let event_class = to_pascal_case(&event_base);
+            (
+                format!("import type {event_class} from '#app/events/{event_base}.js'\n\n"),
+                event_class.clone(),
+                format!("emitter.on({event_class}, {class_name})"),
+            )
+        }
+        None => (
+            String::new(),
+            "unknown".to_string(),
+            format!("emitter.on(SomeEvent, {class_name})"),
+        ),
+    };
+
+    let content = format!(
+        r#"{import_line}/**
+ * Register it with the emitter:
+ *   {registration}
+ */
+export default class {class_name} {{
+  async handle(event: {event_type}): Promise<void> {{
+    // React to the event.
+    void event
+  }}
+}}
+"#
+    );
+    (path, content)
+}
+
+/// Drop a trailing `Middleware` / `Event` / `Listener` so `make:event UserCreatedEvent`
+/// does not produce `UserCreatedEventEvent`.
+fn strip_suffix_ci(name: &str, suffix: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    let suffix_lower = suffix.to_ascii_lowercase();
+    if lower.len() > suffix_lower.len() && lower.ends_with(&suffix_lower) {
+        let cut = name.len() - suffix.len();
+        return name[..cut].trim_end_matches(['_', '-']).to_string();
+    }
+    name.to_string()
+}
+
 fn generate_migration(name: &str) -> Result<(String, String), String> {
     let date = today_yyyymmdd()?;
     let seq = next_migration_sequence(&date);
@@ -731,6 +941,60 @@ fn days_to_date(days: u64) -> (u64, u64, u64) {
 
 fn is_leap(y: u64) -> bool {
     (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
+}
+
+#[cfg(test)]
+mod generator_conventions {
+    use super::*;
+
+    /// Adonis documents a `Middleware` suffix for middleware ("names are
+    /// singular with a 'middleware' suffix, e.g. BodyParserMiddleware") but no
+    /// suffix for events or listeners. Getting this backwards produced
+    /// `OrderShippedEventEvent`-shaped names, so it is pinned here.
+    #[test]
+    fn generated_names_follow_adonis_suffix_rules() {
+        let (path, content) = generate_middleware("auth", "router");
+        assert_eq!(path, "app/middleware/auth_middleware.ts");
+        assert!(content.contains("class AuthMiddleware"), "{content}");
+
+        let (path, content) = generate_event("orderShipped");
+        assert_eq!(path, "app/events/order_shipped.ts");
+        assert!(content.contains("class OrderShipped extends BaseEvent"), "{content}");
+        assert!(!content.contains("OrderShippedEvent"), "no Event suffix: {content}");
+
+        let (path, content) = generate_listener("sendMail", None);
+        assert_eq!(path, "app/listeners/send_mail.ts");
+        assert!(content.contains("class SendMail"), "{content}");
+        assert!(!content.contains("SendMailListener"), "no Listener suffix: {content}");
+    }
+
+    /// `--stack` picks the registration hint, `--event` types the handler.
+    #[test]
+    fn generator_options_change_the_output() {
+        let (_, server) = generate_middleware("auth", "server");
+        assert!(server.contains("server.use("), "{server}");
+        let (_, named) = generate_middleware("auth", "named");
+        assert!(named.contains("router.named("), "{named}");
+
+        let (_, listener) = generate_listener("sendMail", Some("orderShipped"));
+        assert!(listener.contains("import type OrderShipped"), "{listener}");
+        assert!(listener.contains("handle(event: OrderShipped)"), "{listener}");
+        assert!(listener.contains("emitter.on(OrderShipped, SendMail)"), "{listener}");
+    }
+
+    /// A namespaced command name is a valid COMMAND name but not a valid class
+    /// or file name — `app:provision` must not leak a colon into either.
+    #[test]
+    fn namespaced_command_names_are_sanitised() {
+        assert!(validate_command_name("app:provision").is_ok());
+        assert!(validate_command_name(":bad").is_err());
+        assert!(validate_command_name("a::b").is_err());
+
+        let (path, content) = generate_command("app:provision");
+        assert_eq!(path, "commands/app-provision.ts");
+        assert!(content.contains("class AppProvision"), "{content}");
+        assert!(content.contains("commandName = 'app:provision'"), "{content}");
+    }
 }
 
 #[cfg(test)]

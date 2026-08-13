@@ -117,7 +117,7 @@ fn invoke_node() -> Result<VapidKeyPair, String> {
 
 /// Read an env var's value from a `.env` file's raw text. Strips matching
 /// surrounding quotes; ignores lines that start with `#`.
-fn read_env_value(content: &str, key: &str) -> Option<String> {
+pub(crate) fn read_env_value(content: &str, key: &str) -> Option<String> {
     for line in content.lines() {
         let trimmed = line.trim_start();
         if trimmed.starts_with('#') || trimmed.is_empty() {
@@ -135,7 +135,7 @@ fn read_env_value(content: &str, key: &str) -> Option<String> {
 /// Upsert `KEY=VALUE` in a `.env` file's raw text. Preserves all other lines
 /// verbatim. If `KEY` is already present, replaces its line in place;
 /// otherwise appends a new line at the end (with a trailing newline).
-fn upsert_env_var(content: &str, key: &str, value: &str) -> String {
+pub(crate) fn upsert_env_var(content: &str, key: &str, value: &str) -> String {
     let new_line = format!("{}={}", key, value);
     let mut out = String::with_capacity(content.len() + new_line.len() + 1);
     let mut replaced = false;
