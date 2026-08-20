@@ -208,7 +208,7 @@ fn package_json(name: &str, template: &str) -> String {
     if template != "slim" {
         deps.extend([
             r#""@c9up/atlas": "^0.2.0""#.to_string(),
-            r#""@c9up/rune": "^0.1.8""#.to_string(),
+            r#""@c9up/rune": "^0.1.7""#.to_string(),
             r#""@c9up/warden": "^0.1.16""#.to_string(),
             r#""@c9up/spectrum": "^0.1.9""#.to_string(),
         ]);
@@ -217,11 +217,11 @@ fn package_json(name: &str, template: &str) -> String {
         // Full web stack on top of the api set: HTML templating, events,
         // middleware, signing, and date/recurrence.
         deps.extend([
-            r#""@c9up/inker": "^0.1.8""#.to_string(),
+            r#""@c9up/inker": "^0.1.7""#.to_string(),
             r#""@c9up/echo": "^0.1.7""#.to_string(),
             r#""@c9up/blackhole": "^0.1.10""#.to_string(),
             r#""@c9up/sigil": "^0.1.9""#.to_string(),
-            r#""@c9up/chronos": "^0.1.7""#.to_string(),
+            r#""@c9up/chronos": "^0.1.6""#.to_string(),
         ]);
     }
 
