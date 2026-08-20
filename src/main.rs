@@ -6,6 +6,7 @@
 mod add;
 mod codemods;
 mod commands;
+mod dev;
 mod doctor;
 mod generator;
 mod mcp;
@@ -459,9 +460,9 @@ fn main() {
             template::run(&name, destination.as_deref())
         }
         Commands::Add { package, dev, force, flags } => add::run(&package, dev, force, &flags),
-        Commands::Dev => commands::spawn_node("node", &commands::dev_args()),
+        Commands::Dev => commands::run_dev(),
         Commands::Start => commands::spawn_node("node", &["dist/bin/server.js"]),
-        Commands::Build => commands::spawn_node("npx", &["tsc"]),
+        Commands::Build => commands::run_build(),
         Commands::Test {
             suites,
             threads,

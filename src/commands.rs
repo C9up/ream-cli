@@ -47,6 +47,98 @@ pub fn dev_args() -> [&'static str; 4] {
     ]
 }
 
+/// Read `assets` from the rc file, if the project has one.
+///
+/// The rc file is TypeScript, so it is read by Node rather than parsed here —
+/// the same route `ream test` takes. A project without an rc file, or without
+/// an `assets` key, simply has nothing to run alongside the server.
+pub fn read_assets_config() -> Result<crate::dev::AssetsConfig, String> {
+    if !std::path::Path::new("reamrc.ts").exists() {
+        return Ok(crate::dev::AssetsConfig::default());
+    }
+
+    let output = Command::new("node")
+        .args([
+            "--import",
+            "@swc-node/register/esm-register",
+            "--input-type=module",
+            "-e",
+            "const rc = (await import('./reamrc.ts')).default; \
+             process.stdout.write(JSON.stringify(rc?.assets ?? null));",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to read reamrc.ts: {e}"))?;
+
+    if !output.status.success() {
+        // A broken rc file must not silently drop the assets pipeline: say so
+        // rather than starting a server whose stylesheet nobody rebuilds.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "Could not read `assets` from reamrc.ts:\n{}",
+            stderr.trim()
+        ));
+    }
+
+    crate::dev::parse_assets(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// `ream dev` — the server, plus whatever the rc file says builds the assets.
+pub fn run_dev() -> Result<(), String> {
+    if !std::path::Path::new("package.json").exists() {
+        return Err("Not in a Ream project (no package.json found)".to_string());
+    }
+
+    let assets = read_assets_config()?;
+    let Some(watcher) = assets.dev_server else {
+        // Nothing to run alongside: keep the plain path, where the server owns
+        // the terminal and its output is not piped through a prefix.
+        return spawn_node("node", &dev_args());
+    };
+
+    let server = crate::dev::CommandSpec {
+        command: "node".to_string(),
+        args: dev_args().iter().map(|arg| (*arg).to_string()).collect(),
+    };
+
+    crate::dev::run_together(vec![
+        crate::dev::Process {
+            label: "server".to_string(),
+            colour: crate::dev::COLOURS[0],
+            spec: server,
+        },
+        crate::dev::Process {
+            label: "assets".to_string(),
+            colour: crate::dev::COLOURS[1],
+            spec: watcher,
+        },
+    ])
+}
+
+/// `ream build` — the assets first, then TypeScript.
+///
+/// Assets first: a stylesheet the templates reference has to exist before the
+/// build that copies it, and a failing asset build must stop the run rather
+/// than ship a dist with a stale file in it.
+pub fn run_build() -> Result<(), String> {
+    if !std::path::Path::new("package.json").exists() {
+        return Err("Not in a Ream project (no package.json found)".to_string());
+    }
+
+    if let Some(build) = read_assets_config()?.build {
+        let args: Vec<&str> = build.args.iter().map(String::as_str).collect();
+        let status = inherited_status(&build.command, &args)?;
+        if !status.success() {
+            return Err(format!(
+                "assets build (`{}`) exited with code {}",
+                build.command,
+                status.code().unwrap_or(-1)
+            ));
+        }
+    }
+
+    spawn_node("npx", &["tsc"])
+}
+
 /// Run a migration command via Node.js inline script.
 /// Boots the app, resolves db from the container, creates a MigrationRunner, and delegates.
 pub fn run_migration(action: &str) -> Result<(), String> {

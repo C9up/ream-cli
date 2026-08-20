@@ -63,6 +63,23 @@ cargo build --release
 # Binary at target/release/ream
 ```
 
+## Assets
+
+`ream dev` runs the server and whatever builds your assets as one thing, and `ream build` builds the assets before TypeScript. Declare them in `reamrc.ts`:
+
+```ts
+export default {
+  assets: {
+    devServer: { command: 'pnpm', args: ['css:watch'] },
+    build: { command: 'pnpm', args: ['css'] },
+  },
+}
+```
+
+Output is line-prefixed per process, and when one stops the other is stopped with it — a Ctrl-C leaves no orphan watcher holding the output file. Without this, an app ends up wiring `concurrently -k` itself.
+
+Both keys are optional: with no `assets`, `ream dev` and `ream build` behave exactly as before.
+
 ## License
 
 MIT
