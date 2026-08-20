@@ -1092,10 +1092,25 @@ pub fn run_tests(
     let script = format!(
         r#"
         import 'reflect-metadata';
-        import {{ runTestsFromRcFile }} from '@c9up/helix-plugin-ream/runner';
         const options = {};
         for (const key of Object.keys(options)) {{
             if (options[key] === null) delete options[key];
+        }}
+        let runTestsFromRcFile;
+        try {{
+            ({{ runTestsFromRcFile }} = await import('@c9up/helix-plugin-ream/runner'));
+        }} catch (err) {{
+            // The runner is opt-in: a project testing with vitest never installs
+            // it. Saying so beats a bare ERR_MODULE_NOT_FOUND on a package the
+            // user never named.
+            if (String(err && err.message).includes('@c9up/helix-plugin-ream')) {{
+                process.stderr.write(
+                    'ream: `ream test` runs the suites through helix, which this project does not have.\n' +
+                    '  pnpm add -D @c9up/helix @c9up/helix-plugin-ream\n'
+                );
+                process.exit(1);
+            }}
+            throw err;
         }}
         try {{
             process.exitCode = await runTestsFromRcFile('./reamrc.ts', options);
