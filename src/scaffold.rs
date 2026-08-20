@@ -195,33 +195,33 @@ new Ignitor(APP_ROOT, { importer: IMPORTER })
 "##;
 
 fn package_json(name: &str, template: &str) -> String {
-    // Current framework baseline. `^0.1.0` would misrepresent the released
-    // version AND never pull a future 0.2.0 (caret stays under the next minor on
-    // 0.x). Bump this one line when the @c9up packages move to a new minor.
-    const FW: &str = "^0.1.4";
+    // One pin per package: on 0.x a caret stays under the next minor, so a
+    // single shared baseline silently stops resolving the moment one package
+    // moves — `^0.1.4` could never install @c9up/atlas once it reached 0.2.0.
+    // Each entry tracks the minor that package is published on.
     let mut deps = vec![
-        format!(r#""@c9up/ream": "{FW}""#),
+        r#""@c9up/ream": "^0.1.27""#.to_string(),
         // bin/server.ts imports it directly; with pnpm's strict node_modules a
         // transitive copy (via @c9up/atlas) isn't resolvable, so declare it.
         r#""reflect-metadata": "^0.2""#.to_string(),
     ];
     if template != "slim" {
         deps.extend([
-            format!(r#""@c9up/atlas": "{FW}""#),
-            format!(r#""@c9up/rune": "{FW}""#),
-            format!(r#""@c9up/warden": "{FW}""#),
-            format!(r#""@c9up/spectrum": "{FW}""#),
+            r#""@c9up/atlas": "^0.2.0""#.to_string(),
+            r#""@c9up/rune": "^0.1.8""#.to_string(),
+            r#""@c9up/warden": "^0.1.16""#.to_string(),
+            r#""@c9up/spectrum": "^0.1.9""#.to_string(),
         ]);
     }
     if template == "web" {
         // Full web stack on top of the api set: HTML templating, events,
         // middleware, signing, and date/recurrence.
         deps.extend([
-            format!(r#""@c9up/inker": "{FW}""#),
-            format!(r#""@c9up/echo": "{FW}""#),
-            format!(r#""@c9up/blackhole": "{FW}""#),
-            format!(r#""@c9up/sigil": "{FW}""#),
-            format!(r#""@c9up/chronos": "{FW}""#),
+            r#""@c9up/inker": "^0.1.8""#.to_string(),
+            r#""@c9up/echo": "^0.1.7""#.to_string(),
+            r#""@c9up/blackhole": "^0.1.10""#.to_string(),
+            r#""@c9up/sigil": "^0.1.9""#.to_string(),
+            r#""@c9up/chronos": "^0.1.7""#.to_string(),
         ]);
     }
 
