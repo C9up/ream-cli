@@ -1070,7 +1070,7 @@ pub fn info() -> Result<(), String> {
 /// Run the test suites declared in the rc file's `tests` block.
 ///
 /// The AdonisJS stratification: the framework reads its rc file and hands the
-/// suites to the runner. All of that lives in TypeScript (`@c9up/ream/test-runner`),
+/// suites to the runner. All of that lives in TypeScript (`@c9up/helix-plugin-ream/runner`),
 /// so this stays a thin spawn — the same split as `run_migration`.
 pub fn run_tests(
     suites: &[String],
@@ -1092,7 +1092,7 @@ pub fn run_tests(
     let script = format!(
         r#"
         import 'reflect-metadata';
-        import {{ runTestsFromRcFile }} from '@c9up/ream/test-runner';
+        import {{ runTestsFromRcFile }} from '@c9up/helix-plugin-ream/runner';
         const options = {};
         for (const key of Object.keys(options)) {{
             if (options[key] === null) delete options[key];
