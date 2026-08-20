@@ -683,8 +683,8 @@ fn generate_command(name: &str) -> (String, String) {
     let class_name = to_pascal_case(&file_name);
     let path = format!("commands/{file_name}.ts");
     let content = format!(
-        r#"import {{ BaseCommand, flags }} from '@c9up/ream/ace'
-import type {{ CommandOptions }} from '@c9up/ream/ace'
+        r#"import {{ BaseCommand, flags }} from '@c9up/ream/console'
+import type {{ CommandOptions }} from '@c9up/ream/console'
 
 export default class {class_name} extends BaseCommand {{
   static commandName = '{name}'
@@ -692,7 +692,7 @@ export default class {class_name} extends BaseCommand {{
 
   /**
    * `startApp` boots providers and the container before `run()`. Off by
-   * default, as in Ace: a command that only touches the filesystem has no
+   * default: a command that only touches the filesystem has no
    * reason to open a database connection. Turn it on to reach `this.app`.
    */
   static options: CommandOptions = {{ startApp: false }}

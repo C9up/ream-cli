@@ -30,7 +30,7 @@ struct Cli {
     #[arg(long, global = true)]
     no_ansi: bool,
 
-    /// Optional: `ream` with no command lists them, as `node ace` does.
+    /// Optional: `ream` with no command lists them, as a bare `ream` does.
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -304,7 +304,7 @@ enum Commands {
 
     /// Any other name is dispatched to the app's console kernel.
     ///
-    /// This is the `node ace <command>` equivalent: `ream provision --email x`
+    /// This is the app-command dispatch: `ream provision --email x`
     /// runs the app's `provision` command with its flags intact. Without it an
     /// app can only reach its own commands through a hand-written entry, which
     /// is what pushed projects to throwaway `tsx bin/*.ts` scripts.
@@ -422,7 +422,7 @@ fn native_command_name(command: &Commands) -> Option<&'static str> {
 fn main() {
     let cli = Cli::parse();
 
-    // Ace's global colour switches. Exported so the Node side (which renders
+    // The console's global colour switches. Exported so the Node side (which renders
     // most of the output) sees the same decision as this binary.
     if cli.no_ansi {
         unsafe { std::env::set_var("NO_COLOR", "1") };
@@ -432,13 +432,13 @@ fn main() {
         unsafe { std::env::remove_var("NO_COLOR") };
     }
 
-    // No subcommand: Ace treats a bare `node ace` as `node ace list`.
+    // No subcommand: a bare `ream` is `ream list`.
     let command = cli.command.unwrap_or(Commands::List {
         namespaces: Vec::new(),
         json: false,
     });
 
-    // Ace resolves every command through one registry, so an application can
+    // The console resolves every command through one registry, so an application can
     // define its own `build` or `test`. Clap matched a native command by name;
     // if the app declares that same name, the app wins and the original argv is
     // forwarded untouched.

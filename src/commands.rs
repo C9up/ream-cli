@@ -339,7 +339,7 @@ pub fn app_declares_command_in(root: &std::path::Path, name: &str) -> bool {
 ///
 /// A command answers to its aliases as much as to its name, so an app aliasing
 /// `start` overrides the built-in exactly as a command named `start` would —
-/// Ace resolves both through one registry.
+/// The console kernel resolves both through one registry.
 fn scan_for_alias(dir: &std::path::Path, name: &str) -> bool {
     let quoted = [format!("\"{name}\""), format!("'{name}'")];
     scan_files(dir, &|text: &str| {
@@ -460,7 +460,7 @@ fn scan_for(dir: &std::path::Path, needles: &[String]) -> bool {
     })
 }
 
-/// Dispatch a command to the app's console kernel — the `node ace <cmd>`
+/// Dispatch a command to the app's console kernel — the app's own console kernel
 /// equivalent, and the reason this binary accepts names it does not define.
 ///
 /// Prefers the app's `bin/console.ts` entry when it exists: an app may wire a
@@ -542,7 +542,7 @@ fn console_script(argv: &[String]) -> String {
 /// One line of `ream list`.
 ///
 /// `name` and `description` drive the grouped human listing; `metadata` is the
-/// full Ace command contract, which is what `--json` prints. Both are carried
+/// full console command contract, which is what `--json` prints. Both are carried
 /// together so the two outputs cannot describe different sets of commands.
 #[derive(Clone, Debug)]
 pub struct ListEntry {
@@ -559,7 +559,7 @@ fn warn_app_commands(reason: &str) {
 
 /// `ream list` — one list covering this binary's commands and the app's own.
 ///
-/// Ace prints a single list; splitting "framework" from "app" would make the
+/// The console prints a single list; splitting "framework" from "app" would make the
 /// user care about which side implements what. App commands are read as JSON so
 /// they can be merged rather than appended.
 pub fn run_list(
@@ -655,7 +655,7 @@ fn merge_entries(
     // what runs.
     let mut entries = app;
 
-    // Except `list`: the console kernel registers its own (Ace does too, so
+    // Except `list`: the console kernel registers its own (the console kernel does too, so
     // that `bin/console.ts list` works), but here it is the SAME command this
     // binary is already running — keeping the app's copy would mark the
     // built-in as shadowed, which is not what happens at dispatch.
@@ -765,7 +765,7 @@ fn app_commands() -> Vec<ListEntry> {
 /// Read the kernel's `list --json` payload.
 ///
 /// Kept apart from the process plumbing so the field names stay under test: the
-/// kernel publishes Ace's metadata contract, whose key is `commandName`, and a
+/// kernel publishes the console's metadata contract, whose key is `commandName`, and a
 /// silent mismatch here drops every one of the app's commands from the listing.
 fn parse_command_list(text: &str) -> Result<Vec<ListEntry>, String> {
     let parsed = serde_json::from_str::<Vec<serde_json::Value>>(text.trim())
@@ -1172,7 +1172,7 @@ mod tests {
 
     #[test]
     fn reads_the_kernel_metadata_key_not_a_summary_field() {
-        // The kernel publishes Ace's contract, keyed on `commandName`. Reading
+        // The kernel publishes the console's contract, keyed on `commandName`. Reading
         // `name` here silently dropped every one of the app's commands.
         let entries = parse_command_list(
             r#"[{ "commandName": "provision", "description": "Create the owner", "flags": [] }]"#,
@@ -1339,7 +1339,7 @@ mod tests {
         assert!(!options["nodeArgs"].to_string().contains("input-type"));
     }
 
-    /// An alias must override a built-in exactly as a command name does — Ace
+    /// An alias must override a built-in exactly as a command name does — the
     /// resolves both through one registry, so `ream start` has to reach an app
     /// command aliased to `start`, not the binary's own.
     #[test]

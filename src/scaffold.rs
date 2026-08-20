@@ -168,7 +168,7 @@ fn write_file(root: &Path, path: &str, content: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The console entry — Ream's `ace` equivalent.
+/// The console entry — where the app's commands are booted from.
 ///
 /// `ream <command>` dispatches here, so a project has a working command line
 /// from the first commit instead of growing throwaway `tsx bin/*.ts` scripts.
