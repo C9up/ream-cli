@@ -292,7 +292,7 @@ fn write_app_base(root: &Path, name: &str) -> Result<(), String> {
     write_file(
         root,
         "bin/server.ts",
-        "import 'reflect-metadata'\nimport { Ignitor, prettyPrintError } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\nconst APP_ROOT = new URL('../', import.meta.url)\n\nnew Ignitor(APP_ROOT, {\n  port: Number(process.env.PORT ?? 3000),\n  serverFactory: createHyperServerFactory(),\n})\n  .useRcFile((await import('../reamrc.js')).default)\n  .httpServer()\n  .start()\n  .then(() => {\n    const port = Number(process.env.PORT ?? 3000)\n    console.log(`\\n  ➜ Ream ready on http://localhost:${port}\\n`)\n  })\n  .catch((err) => {\n    prettyPrintError(err)\n    process.exit(1)\n  })\n",
+        "import 'reflect-metadata'\nimport { Ignitor, prettyPrintError } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\nconst APP_ROOT = new URL('../', import.meta.url)\n\nnew Ignitor(APP_ROOT, {\n  port: Number(process.env.PORT ?? 3000),\n  serverFactory: createHyperServerFactory(),\n})\n  .useRcFile((await import('../reamrc.js')).default)\n  .httpServer()\n  .start()\n  .then((app) => {\n    const port = Number(process.env.PORT ?? 3000)\n    console.log(`\\n  ➜ Ream ready on http://${app.host()}:${port}\\n`)\n  })\n  .catch((err) => {\n    prettyPrintError(err)\n    process.exit(1)\n  })\n",
     )?;
     write_file(root, "providers/AppProvider.ts", "import { Provider } from '@c9up/ream'\n\nexport default class AppProvider extends Provider {\n  register() {}\n  async boot() {}\n  async start() {}\n  async ready() {}\n  async shutdown() {}\n}\n")?;
     write_file(root, "start/routes.ts", &format!("import router from '@c9up/ream/services/router'\n\nrouter.get('/', async ({{ response }}) => {{\n  response.status(200).json({{ name: '{}', status: 'running' }})\n}})\n", name))?;
@@ -426,7 +426,7 @@ fn write_slim_template(root: &Path, _name: &str) -> Result<(), String> {
     write_file(
         root,
         "bin/server.ts",
-        "import { Ignitor } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\nconst app = new Ignitor({\n  port: Number(process.env.PORT ?? 3000),\n  serverFactory: createHyperServerFactory(),\n})\n  .httpServer()\n  .routes((router) => {\n    router.get('/', async ({ response }) => {\n      response.status(200).send('Hello from Ream!')\n    })\n  })\n\nawait app.start()\nconsole.log(`\\n  ➜ Ream ready on http://localhost:${process.env.PORT ?? 3000}\\n`)\n",
+        "import { Ignitor } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\nconst app = new Ignitor({\n  port: Number(process.env.PORT ?? 3000),\n  serverFactory: createHyperServerFactory(),\n})\n  .httpServer()\n  .routes((router) => {\n    router.get('/', async ({ response }) => {\n      response.status(200).send('Hello from Ream!')\n    })\n  })\n\nawait app.start()\nconsole.log(`\\n  ➜ Ream ready on http://${app.host()}:${process.env.PORT ?? 3000}\\n`)\n",
     )?;
     Ok(())
 }
