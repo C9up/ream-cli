@@ -12,6 +12,7 @@ mod generator;
 mod mcp;
 mod nova;
 mod scaffold;
+mod stubs;
 mod template;
 
 use clap::{Parser, Subcommand};
@@ -192,6 +193,19 @@ enum Commands {
         name: String,
         #[command(flatten)]
         flags: GenFlags,
+    },
+
+    /// Publish a make: template into `stubs/make/` so the project can edit it
+    #[command(name = "stubs:publish")]
+    StubsPublish {
+        /// Which stub to publish; omit to publish every one
+        kind: Option<String>,
+        /// List the publishable stubs and the variables each exposes
+        #[arg(long)]
+        list: bool,
+        /// Overwrite a stub the project already published
+        #[arg(long)]
+        force: bool,
     },
 
     /// Generate a database migration
@@ -501,6 +515,17 @@ fn main() {
         }
         Commands::MakeProvider { name, flags } => {
             generator::make("provider", "", &name, flags.dry_run, flags.force)
+        }
+        Commands::StubsPublish { kind, list, force } => {
+            if list {
+                println!("Publishable stubs (written to {}/):", stubs::STUBS_DIR);
+                for (name, vars) in stubs::PUBLISHABLE {
+                    println!("  {name:<12} {{{{ {} }}}}", vars.join(" }} {{ "));
+                }
+                Ok(())
+            } else {
+                stubs::publish(kind.as_deref(), &generator::built_in_stub, force)
+            }
         }
         Commands::MakeMigration { name, flags } => {
             generator::make("migration", "", &name, flags.dry_run, flags.force)

@@ -3,6 +3,7 @@
 //! Story 33.4 reshape: every generator now plans first, then either writes
 //! the plan to disk or emits it as JSON for the MCP `dryRun` path.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path};
 
@@ -216,9 +217,9 @@ pub fn make_with_option(
                     "unknown --stack '{stack}' (expected: server, named, or router)"
                 ));
             }
-            generate_middleware(name, stack)
+            generate_middleware(name, stack)?
         }
-        "event" => generate_event(name),
+        "event" => generate_event(name)?,
         "listener" => {
             if let Some(event) = option {
                 validate_name_relaxed(event, "--event")?;
@@ -242,9 +243,9 @@ pub fn make_module(module: &str, name: &str, dry_run: bool, force: bool) -> Resu
     validate_class_name(name, "name")?;
 
     let entries: Vec<(String, String)> = vec![
-        generate_entity(module, name),
-        generate_controller(module, name),
-        generate_validator(module, name),
+        generate_entity(module, name)?,
+        generate_controller(module, name)?,
+        generate_validator(module, name)?,
         generate_migration(name)?,
     ];
 
@@ -311,29 +312,29 @@ fn build_plan_entries(
     let entry = match kind {
         "service" => {
             require_module(module, kind)?;
-            generate_service(module, name)
+            generate_service(module, name)?
         }
         "entity" => {
             require_module(module, kind)?;
-            generate_entity(module, name)
+            generate_entity(module, name)?
         }
         "controller" => {
             require_module(module, kind)?;
-            generate_controller(module, name)
+            generate_controller(module, name)?
         }
         "validator" => {
             require_module(module, kind)?;
-            generate_validator(module, name)
+            generate_validator(module, name)?
         }
-        "provider" => generate_provider(name),
-        "command" => generate_command(name),
+        "provider" => generate_provider(name)?,
+        "command" => generate_command(name)?,
         "migration" => generate_migration(name)?,
         "seeder" => {
             // Module is OPTIONAL for seeders — they live under
             // `database/seeders/`, not `app/<module>/`. When provided,
             // the module name is stamped into the seeder JSDoc for
             // traceability; when omitted we just emit the file.
-            generate_seeder(module, name)
+            generate_seeder(module, name)?
         }
         other => return Err(format!("Unknown generator type: {other}")),
     };
@@ -530,7 +531,7 @@ fn to_snake_case(name: &str) -> String {
     result
 }
 
-fn generate_service(module: &str, name: &str) -> (String, String) {
+fn generate_service(module: &str, name: &str) -> Result<(String, String), String> {
     let class_name = ensure_suffix(name, "Service");
     let path = format!("app/{module}/{class_name}.ts");
     let content = format!(
@@ -561,10 +562,22 @@ export class {class_name} {{
 }}
 "#
     );
-    (path, content)
+    let vars: BTreeMap<&str, String> = BTreeMap::from([
+        ("className", class_name),
+        ("module", module.to_string()),
+        ("name", name.to_string()),
+    ]);
+    // A published stub may redirect its own output, so the path comes back
+    // from the resolver rather than being decided here.
+    match crate::stubs::resolve("service", &vars, path, content) {
+        Ok(r) => Ok((r.path, r.content)),
+        // A broken stub must not silently fall back to the built-in: the
+        // generated file would look right and ignore the edit. Surface it.
+        Err(e) => Err(e),
+    }
 }
 
-fn generate_entity(module: &str, name: &str) -> (String, String) {
+fn generate_entity(module: &str, name: &str) -> Result<(String, String), String> {
     let table_name = format!("{}s", to_snake_case(name));
     let path = format!("app/{module}/{name}.ts");
     let content = format!(
@@ -579,10 +592,23 @@ export class {name} extends BaseEntity {{
 }}
 "#
     );
-    (path, content)
+    let vars: BTreeMap<&str, String> = BTreeMap::from([
+        ("className", name.to_string()),
+        ("module", module.to_string()),
+        ("name", name.to_string()),
+        ("tableName", table_name.clone()),
+    ]);
+    // A published stub may redirect its own output, so the path comes back
+    // from the resolver rather than being decided here.
+    match crate::stubs::resolve("entity", &vars, path, content) {
+        Ok(r) => Ok((r.path, r.content)),
+        // A broken stub must not silently fall back to the built-in: the
+        // generated file would look right and ignore the edit. Surface it.
+        Err(e) => Err(e),
+    }
 }
 
-fn generate_controller(module: &str, name: &str) -> (String, String) {
+fn generate_controller(module: &str, name: &str) -> Result<(String, String), String> {
     let class_name = ensure_suffix(name, "Controller");
     let path = format!("app/{module}/{class_name}.ts");
     let content = format!(
@@ -616,10 +642,22 @@ export class {class_name} {{
 }}
 "#
     );
-    (path, content)
+    let vars: BTreeMap<&str, String> = BTreeMap::from([
+        ("className", class_name),
+        ("module", module.to_string()),
+        ("name", name.to_string()),
+    ]);
+    // A published stub may redirect its own output, so the path comes back
+    // from the resolver rather than being decided here.
+    match crate::stubs::resolve("controller", &vars, path, content) {
+        Ok(r) => Ok((r.path, r.content)),
+        // A broken stub must not silently fall back to the built-in: the
+        // generated file would look right and ignore the edit. Surface it.
+        Err(e) => Err(e),
+    }
 }
 
-fn generate_validator(module: &str, name: &str) -> (String, String) {
+fn generate_validator(module: &str, name: &str) -> Result<(String, String), String> {
     let class_name = ensure_suffix(name, "Validator");
     let path = format!("app/{module}/{class_name}.ts");
     let content = format!(
@@ -633,10 +671,22 @@ export const {class_name} = schema({{
 }})
 "#
     );
-    (path, content)
+    let vars: BTreeMap<&str, String> = BTreeMap::from([
+        ("className", class_name),
+        ("module", module.to_string()),
+        ("name", name.to_string()),
+    ]);
+    // A published stub may redirect its own output, so the path comes back
+    // from the resolver rather than being decided here.
+    match crate::stubs::resolve("validator", &vars, path, content) {
+        Ok(r) => Ok((r.path, r.content)),
+        // A broken stub must not silently fall back to the built-in: the
+        // generated file would look right and ignore the edit. Surface it.
+        Err(e) => Err(e),
+    }
 }
 
-fn generate_provider(name: &str) -> (String, String) {
+fn generate_provider(name: &str) -> Result<(String, String), String> {
     let class_name = ensure_suffix(name, "Provider");
     let path = format!("providers/{class_name}.ts");
     let content = format!(
@@ -666,7 +716,16 @@ export default class {class_name} extends Provider {{
 }}
 "#
     );
-    (path, content)
+    let vars: BTreeMap<&str, String> =
+        BTreeMap::from([("className", class_name), ("name", name.to_string())]);
+    // A published stub may redirect its own output, so the path comes back
+    // from the resolver rather than being decided here.
+    match crate::stubs::resolve("provider", &vars, path, content) {
+        Ok(r) => Ok((r.path, r.content)),
+        // A broken stub must not silently fall back to the built-in: the
+        // generated file would look right and ignore the edit. Surface it.
+        Err(e) => Err(e),
+    }
 }
 
 /// `make:command` — a console command in the app's `commands/` directory.
@@ -675,7 +734,7 @@ export default class {class_name} extends Provider {{
 /// file is runnable as `ream <name>` with no registration step. `reamrc.ts`
 /// `commands[]` stays reserved for commands shipped by packages, which
 /// discovery cannot see.
-fn generate_command(name: &str) -> (String, String) {
+fn generate_command(name: &str) -> Result<(String, String), String> {
     // `app:provision` is a valid COMMAND name but neither a valid class name nor
     // a valid file name: the namespace separator has to go before either is
     // derived (`app:provision` -> `AppProvision`, `app-provision.ts`).
@@ -711,14 +770,23 @@ export default class {class_name} extends BaseCommand {{
 }}
 "#
     );
-    (path, content)
+    let vars: BTreeMap<&str, String> =
+        BTreeMap::from([("className", class_name), ("name", name.to_string())]);
+    // A published stub may redirect its own output, so the path comes back
+    // from the resolver rather than being decided here.
+    match crate::stubs::resolve("command", &vars, path, content) {
+        Ok(r) => Ok((r.path, r.content)),
+        // A broken stub must not silently fall back to the built-in: the
+        // generated file would look right and ignore the edit. Surface it.
+        Err(e) => Err(e),
+    }
 }
 
 /// `make:middleware` — an HTTP middleware class in `app/middleware/`.
 ///
 /// Adonis's directory and snake_case file convention, which the scaffold
 /// already follows (`app/middleware/auth_middleware.ts`).
-fn generate_middleware(name: &str, stack: &str) -> (String, String) {
+fn generate_middleware(name: &str, stack: &str) -> Result<(String, String), String> {
     let base = to_snake_case(&strip_suffix_ci(name, "middleware"));
     // Adonis documents the `Middleware` suffix for this one specifically
     // ("names are singular with a 'middleware' suffix, e.g. BodyParserMiddleware").
@@ -746,11 +814,23 @@ export default class {class_name} {{
 }}
 "#
     );
-    (path, content)
+    let vars: BTreeMap<&str, String> = BTreeMap::from([
+        ("className", class_name),
+        ("name", name.to_string()),
+        ("stack", stack.to_string()),
+    ]);
+    // A published stub may redirect its own output, so the path comes back
+    // from the resolver rather than being decided here.
+    match crate::stubs::resolve("middleware", &vars, path, content) {
+        Ok(r) => Ok((r.path, r.content)),
+        // A broken stub must not silently fall back to the built-in: the
+        // generated file would look right and ignore the edit. Surface it.
+        Err(e) => Err(e),
+    }
 }
 
 /// `make:event` — a typed event class in `app/events/`.
-fn generate_event(name: &str) -> (String, String) {
+fn generate_event(name: &str) -> Result<(String, String), String> {
     // No suffix: Adonis generates `make:event orderShipped` as `OrderShipped`,
     // unlike middleware, where it documents one.
     let base = to_snake_case(name);
@@ -769,7 +849,16 @@ export default class {class_name} extends BaseEvent {{
 }}
 "#
     );
-    (path, content)
+    let vars: BTreeMap<&str, String> =
+        BTreeMap::from([("className", class_name), ("name", base.clone())]);
+    // A published stub may redirect its own output, so the path comes back
+    // from the resolver rather than being decided here.
+    match crate::stubs::resolve("event", &vars, path, content) {
+        Ok(r) => Ok((r.path, r.content)),
+        // A broken stub must not silently fall back to the built-in: the
+        // generated file would look right and ignore the edit. Surface it.
+        Err(e) => Err(e),
+    }
 }
 
 /// `make:listener` — an event listener class in `app/listeners/`.
@@ -851,7 +940,7 @@ export default class {class_name} extends Migration {{
     Ok((path, content))
 }
 
-fn generate_seeder(module: &str, name: &str) -> (String, String) {
+fn generate_seeder(module: &str, name: &str) -> Result<(String, String), String> {
     let class_name = ensure_suffix(name, "Seeder");
     let path = format!("database/seeders/{class_name}.ts");
     let content = format!(
@@ -868,7 +957,19 @@ export default class {class_name} extends Seeder {{
 }}
 "#
     );
-    (path, content)
+    let vars: BTreeMap<&str, String> = BTreeMap::from([
+        ("className", class_name),
+        ("module", module.to_string()),
+        ("name", name.to_string()),
+    ]);
+    // A published stub may redirect its own output, so the path comes back
+    // from the resolver rather than being decided here.
+    match crate::stubs::resolve("seeder", &vars, path, content) {
+        Ok(r) => Ok((r.path, r.content)),
+        // A broken stub must not silently fall back to the built-in: the
+        // generated file would look right and ignore the edit. Surface it.
+        Err(e) => Err(e),
+    }
 }
 
 fn today_yyyymmdd() -> Result<String, String> {
@@ -953,11 +1054,11 @@ mod generator_conventions {
     /// `OrderShippedEventEvent`-shaped names, so it is pinned here.
     #[test]
     fn generated_names_follow_adonis_suffix_rules() {
-        let (path, content) = generate_middleware("auth", "router");
+        let (path, content) = generate_middleware("auth", "router").expect("generator");
         assert_eq!(path, "app/middleware/auth_middleware.ts");
         assert!(content.contains("class AuthMiddleware"), "{content}");
 
-        let (path, content) = generate_event("orderShipped");
+        let (path, content) = generate_event("orderShipped").expect("generator");
         assert_eq!(path, "app/events/order_shipped.ts");
         assert!(
             content.contains("class OrderShipped extends BaseEvent"),
@@ -980,9 +1081,9 @@ mod generator_conventions {
     /// `--stack` picks the registration hint, `--event` types the handler.
     #[test]
     fn generator_options_change_the_output() {
-        let (_, server) = generate_middleware("auth", "server");
+        let (_, server) = generate_middleware("auth", "server").expect("generator");
         assert!(server.contains("server.use("), "{server}");
-        let (_, named) = generate_middleware("auth", "named");
+        let (_, named) = generate_middleware("auth", "named").expect("generator");
         assert!(named.contains("router.named("), "{named}");
 
         let (_, listener) = generate_listener("sendMail", Some("orderShipped"));
@@ -1005,7 +1106,7 @@ mod generator_conventions {
         assert!(validate_command_name(":bad").is_err());
         assert!(validate_command_name("a::b").is_err());
 
-        let (path, content) = generate_command("app:provision");
+        let (path, content) = generate_command("app:provision").expect("generator");
         assert_eq!(path, "commands/app-provision.ts");
         assert!(content.contains("class AppProvision"), "{content}");
         assert!(
@@ -1073,10 +1174,10 @@ mod tests {
         // routing through stdout/cwd side-effects.
         let mut plan = Plan::default();
         for (path, content) in [
-            generate_entity("orders", "Order"),
-            generate_controller("orders", "Order"),
-            generate_validator("orders", "Order"),
-            generate_migration("Order").unwrap(),
+            generate_entity("orders", "Order").expect("entity"),
+            generate_controller("orders", "Order").expect("controller"),
+            generate_validator("orders", "Order").expect("validator"),
+            generate_migration("Order").expect("migration"),
         ] {
             plan_or_write(&mut plan, true, false, &path, &content).unwrap();
         }
@@ -1100,13 +1201,13 @@ mod tests {
     fn fr_implements_marker_baked_into_every_template() {
         // Story 33.2's traceability tools key off `@implements FR` —
         // every generated file must carry the marker.
-        let entity = generate_entity("orders", "Order").1;
-        let controller = generate_controller("orders", "Order").1;
-        let validator = generate_validator("orders", "Order").1;
-        let provider = generate_provider("App").1;
+        let entity = generate_entity("orders", "Order").expect("generator").1;
+        let controller = generate_controller("orders", "Order").expect("generator").1;
+        let validator = generate_validator("orders", "Order").expect("generator").1;
+        let provider = generate_provider("App").expect("generator").1;
         let migration = generate_migration("CreateOrders").unwrap().1;
-        let seeder = generate_seeder("orders", "User").1;
-        let service = generate_service("orders", "Mailer").1;
+        let seeder = generate_seeder("orders", "User").expect("generator").1;
+        let service = generate_service("orders", "Mailer").expect("generator").1;
         for body in [
             &entity,
             &controller,
@@ -1150,5 +1251,107 @@ mod tests {
         let entries = build_plan_entries("seeder", "", "User").unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, "database/seeders/UserSeeder.ts");
+    }
+}
+
+/// The built-in template for `kind`, rendered back into a stub: generate with
+/// sentinel names, then swap each sentinel for its `{{ placeholder }}`. Doing
+/// it this way means a published stub is EXACTLY the template the generator
+/// uses — it cannot drift from a hand-maintained second copy.
+pub fn built_in_stub(kind: &str) -> Option<String> {
+    const MODULE: &str = "zzmodulezz";
+    const NAME: &str = "ZzNameZz";
+
+    let (_, content) = match match kind {
+        "controller" => generate_controller(MODULE, NAME),
+        "entity" => generate_entity(MODULE, NAME),
+        "service" => generate_service(MODULE, NAME),
+        "validator" => generate_validator(MODULE, NAME),
+        "seeder" => generate_seeder(MODULE, NAME),
+        "provider" => generate_provider(NAME),
+        "command" => generate_command(NAME),
+        "middleware" => generate_middleware(NAME, "router"),
+        "event" => generate_event(NAME),
+        _ => return None,
+    } {
+        Ok(pair) => pair,
+        // Rendering the built-in cannot consult a published stub (the sentinels
+        // are ours), so a failure here would be a bug in this function.
+        Err(_) => return None,
+    };
+
+    // Longest first: `ZzNameZzController` must become `{{ className }}` before
+    // the bare `ZzNameZz` is replaced, or half of it would survive.
+    let table = format!("{}s", to_snake_case(NAME));
+    let snake = to_snake_case(NAME);
+    let mut out = content;
+    for suffix in [
+        "Controller",
+        "Validator",
+        "Service",
+        "Seeder",
+        "Provider",
+        "Command",
+        "Middleware",
+        "Listener",
+        "Event",
+    ] {
+        out = out.replace(&format!("{NAME}{suffix}"), "{{ className }}");
+    }
+    out = out.replace(&table, "{{ tableName }}");
+    out = out.replace(NAME, "{{ className }}");
+    out = out.replace(&snake, "{{ name }}");
+    out = out.replace(MODULE, "{{ module }}");
+    Some(out)
+}
+
+#[cfg(test)]
+mod stub_publish_tests {
+    use super::*;
+    use crate::stubs::PUBLISHABLE;
+
+    #[test]
+    fn every_publishable_kind_has_a_built_in_template() {
+        for (kind, _) in PUBLISHABLE {
+            assert!(
+                built_in_stub(kind).is_some(),
+                "stubs::PUBLISHABLE lists '{kind}' but no template renders for it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_published_stub_keeps_no_sentinel_behind() {
+        // A surviving sentinel means the generated file would carry a literal
+        // `ZzNameZz` — the failure a reader would only notice after publishing.
+        for (kind, _) in PUBLISHABLE {
+            let stub = built_in_stub(kind).expect("template");
+            assert!(
+                !stub.contains("ZzNameZz"),
+                "{kind}: class sentinel survived"
+            );
+            assert!(
+                !stub.contains("zz_name_zz"),
+                "{kind}: snake sentinel survived"
+            );
+            assert!(
+                !stub.contains("zzmodulezz"),
+                "{kind}: module sentinel survived"
+            );
+        }
+    }
+
+    #[test]
+    fn a_published_stub_renders_back_to_the_built_in_output() {
+        // Publishing then rendering must reproduce what the generator emits,
+        // or an app that publishes a stub silently changes its own output.
+        let (_, direct) = generate_controller("billing", "Invoice").expect("generator");
+        let stub = built_in_stub("controller").expect("template");
+        let vars: BTreeMap<&str, String> = BTreeMap::from([
+            ("className", "InvoiceController".to_string()),
+            ("module", "billing".to_string()),
+            ("name", "invoice".to_string()),
+        ]);
+        assert_eq!(crate::stubs::render(&stub, &vars), direct);
     }
 }
