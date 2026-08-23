@@ -32,6 +32,7 @@ ream make:provider Stripe
 ream make:migration create_orders_table
 ream make:seeder OrdersSeeder
 ream make:module order Order          # entity + controller + validator + migration
+ream stubs:publish controller         # copy a make: template into stubs/make/ to edit it
 
 # Database
 ream migrate                          # run pending migrations
