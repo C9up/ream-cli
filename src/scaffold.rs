@@ -6,7 +6,19 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
-pub fn run(name: &str) -> Result<(), String> {
+/// What `ream new` was told on the command line.
+///
+/// A flag skips its prompt, and `--yes` takes the default for whatever is left,
+/// so the command runs with no terminal at all — CI, a container, a script.
+/// Without this the two `Select` prompts abort on a raw dialoguer I/O error.
+#[derive(Default)]
+pub struct NewOptions<'a> {
+    pub template: Option<&'a str>,
+    pub database: Option<&'a str>,
+    pub yes: bool,
+}
+
+pub fn run(name: &str, options: &NewOptions<'_>) -> Result<(), String> {
     // Validate project name
     if !name
         .chars()
@@ -22,26 +34,18 @@ pub fn run(name: &str) -> Result<(), String> {
 
     println!("\n  \x1b[1mCreating Ream project: {}\x1b[0m\n", name);
 
-    // Template selection
-    let templates = vec!["api", "web", "microservice", "slim"];
-    let template_idx = Select::new()
-        .with_prompt("Select a template")
-        .items(&templates)
-        .default(0)
-        .interact()
-        .map_err(|e| format!("Prompt failed: {}", e))?;
-    let template = templates[template_idx];
+    const TEMPLATES: [&str; 4] = ["api", "web", "microservice", "slim"];
+    const DATABASES: [&str; 2] = ["postgres", "sqlite"];
+    // Both flags are checked before either prompt: a bad value is an error in
+    // the command line, and must be reported as one whether or not there is a
+    // terminal to prompt on.
+    validate("template", &TEMPLATES, options.template)?;
+    validate("db", &DATABASES, options.database)?;
 
-    // Database selection
-    let databases = vec!["postgres", "sqlite"];
-    let db_idx = Select::new()
-        .with_prompt("Select a database")
-        .items(&databases)
-        .default(0)
-        .interact()
-        .map_err(|e| format!("Prompt failed: {}", e))?;
-    let database = databases[db_idx];
+    let template = choose("template", &TEMPLATES, options.template, options.yes)?;
+    let database = choose("db", &DATABASES, options.database, options.yes)?;
 
+    let (template, database) = (template.as_str(), database.as_str());
     println!(
         "\n  Scaffolding {} (template={}, database={})...\n",
         name, template, database
@@ -438,6 +442,48 @@ fn write_microservice_template(root: &Path, name: &str) -> Result<(), String> {
 
 const GITIGNORE: &str = "node_modules/\ndist/\n.env\n*.sqlite\ndata/\n";
 
+/// Reject an unknown flag value, naming what was allowed — rather than
+/// scaffolding something the user did not ask for.
+pub fn validate(flag: &str, allowed: &[&str], given: Option<&str>) -> Result<(), String> {
+    match given {
+        Some(value) if !allowed.contains(&value) => Err(format!(
+            "Unknown --{} '{}' — expected one of: {}",
+            flag,
+            value,
+            allowed.join(", ")
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Resolve one choice: the flag if given, the default under `--yes`, else a
+/// prompt.
+fn choose(flag: &str, allowed: &[&str], given: Option<&str>, yes: bool) -> Result<String, String> {
+    if let Some(value) = given {
+        return Ok(value.to_string());
+    }
+    if yes {
+        return Ok(allowed[0].to_string());
+    }
+    let index = Select::new()
+        .with_prompt(format!("Select a {}", flag))
+        .items(allowed)
+        .default(0)
+        .interact()
+        // dialoguer fails here when there is no terminal to read from, and its
+        // own message says nothing about how to proceed.
+        .map_err(|e| {
+            format!(
+                "Cannot prompt for --{} ({}). Pass --{} <{}> or --yes to take the default.",
+                flag,
+                e,
+                flag,
+                allowed.join("|")
+            )
+        })?;
+    Ok(allowed[index].to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,5 +708,34 @@ mod tests {
             "slim must not write app.ts (ream dev/start target bin/server.ts)"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    const TEMPLATES: [&str; 4] = ["api", "web", "microservice", "slim"];
+
+    #[test]
+    fn a_flag_value_is_taken_as_given() {
+        assert_eq!(
+            choose("template", &TEMPLATES, Some("slim"), false).unwrap(),
+            "slim"
+        );
+    }
+
+    #[test]
+    fn yes_takes_the_first_option_without_a_terminal() {
+        // The whole point of --yes: no prompt, so no TTY needed.
+        assert_eq!(choose("template", &TEMPLATES, None, true).unwrap(), "api");
+    }
+
+    #[test]
+    fn an_unknown_flag_value_names_what_was_allowed() {
+        let error = validate("template", &TEMPLATES, Some("rails")).unwrap_err();
+        assert!(error.contains("Unknown --template 'rails'"));
+        assert!(error.contains("api, web, microservice, slim"));
+    }
+
+    #[test]
+    fn a_valid_flag_value_passes_validation() {
+        assert!(validate("template", &TEMPLATES, Some("web")).is_ok());
+        assert!(validate("template", &TEMPLATES, None).is_ok());
     }
 }

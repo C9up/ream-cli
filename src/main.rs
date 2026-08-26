@@ -64,6 +64,15 @@ enum Commands {
     New {
         /// Project name
         name: String,
+        /// Starting point: api, web, microservice or slim (skips the prompt)
+        #[arg(long)]
+        template: Option<String>,
+        /// Database: postgres or sqlite (skips the prompt)
+        #[arg(long)]
+        db: Option<String>,
+        /// Take the default for anything not passed as a flag — no terminal needed
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 
     /// Install a project template by cloning its upstream repo (e.g. kitchen-sink)
@@ -469,7 +478,19 @@ fn main() {
     }
 
     let result = match command {
-        Commands::New { name } => scaffold::run(&name),
+        Commands::New {
+            name,
+            template,
+            db,
+            yes,
+        } => scaffold::run(
+            &name,
+            &scaffold::NewOptions {
+                template: template.as_deref(),
+                database: db.as_deref(),
+                yes,
+            },
+        ),
         Commands::Template { name, destination } => {
             template::run(&name, destination.as_deref())
         }

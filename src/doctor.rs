@@ -26,6 +26,7 @@ pub fn run() -> Result<(), String> {
         check_reamrc(),
         check_package_json(),
         check_tsconfig(),
+        check_ts_loader(),
     ];
 
     let mut passed = 0;
@@ -256,6 +257,54 @@ fn check_tsconfig() -> Check {
     }
 }
 
+/// The TypeScript loader every app-booting command spawns Node with.
+///
+/// `ream dev`, `build`, `inspect` and `schedule:list` all run
+/// `node --import @swc-node/register/esm-register`, resolved from the PROJECT's
+/// node_modules — the CLI is a Rust binary and carries no JS dependencies of
+/// its own. Without it those four commands die on Node's raw
+/// `ERR_MODULE_NOT_FOUND` while the generators still work, so a project can
+/// look healthy while two thirds of the CLI is unusable. That is the gap this
+/// check exists to close.
+fn check_ts_loader() -> Check {
+    check_ts_loader_at(Path::new("."))
+}
+
+/// Rooted so a test can point it at a fixture instead of changing the process
+/// working directory, which the whole test binary shares.
+fn check_ts_loader_at(root: &Path) -> Check {
+    const NAME: &str = "@swc-node/register";
+    if root.join("node_modules/@swc-node/register").exists() {
+        return Check {
+            name: NAME,
+            status: Status::Pass,
+            message: "TypeScript loader present".to_string(),
+            fix: None,
+        };
+    }
+    // Declared but not installed is a different sentence: the manifest is right
+    // and the tree is stale, so `pnpm install` is the fix, not `pnpm add`.
+    let declared = std::fs::read_to_string(root.join("package.json"))
+        .map(|c| c.contains("@swc-node/register"))
+        .unwrap_or(false);
+    if declared {
+        return Check {
+            name: NAME,
+            status: Status::Fail,
+            message: "declared but not installed".to_string(),
+            fix: Some("Run `pnpm install`".to_string()),
+        };
+    }
+    Check {
+        name: NAME,
+        status: Status::Fail,
+        message: "missing — `ream dev`, `build`, `console`, `test`, `inspect`, `repl`, \
+                  `migration:*` and `schedule:*` cannot run"
+            .to_string(),
+        fix: Some("Run `pnpm add -D @swc-node/register`".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +320,53 @@ mod tests {
     fn test_check_pnpm() {
         let check = check_pnpm();
         assert!(!check.message.is_empty());
+    }
+
+    /// A unique directory under the system temp dir. No `tempfile` dependency:
+    /// the CLI ships none and this is the only test that needs a fixture tree.
+    fn fixture(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ream-doctor-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        dir
+    }
+
+    #[test]
+    fn ts_loader_passes_when_installed() {
+        let dir = fixture("installed");
+        std::fs::create_dir_all(dir.join("node_modules/@swc-node/register")).unwrap();
+        let check = check_ts_loader_at(&dir);
+        assert!(matches!(check.status, Status::Pass));
+        assert!(check.fix.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ts_loader_fails_when_absent_and_says_what_to_install() {
+        let dir = fixture("absent");
+        std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
+        let check = check_ts_loader_at(&dir);
+        assert!(matches!(check.status, Status::Fail));
+        // Without this, `doctor` reports a healthy project while `ream dev`
+        // dies on ERR_MODULE_NOT_FOUND — the case this check exists for.
+        assert!(check
+            .fix
+            .unwrap()
+            .contains("pnpm add -D @swc-node/register"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ts_loader_tells_a_stale_tree_to_install_not_to_add() {
+        let dir = fixture("declared");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"devDependencies":{"@swc-node/register":"^0.9.0"}}"#,
+        )
+        .unwrap();
+        let check = check_ts_loader_at(&dir);
+        assert!(matches!(check.status, Status::Fail));
+        assert_eq!(check.fix.as_deref(), Some("Run `pnpm install`"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

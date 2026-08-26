@@ -2,6 +2,36 @@
 
 use std::process::{Command, ExitStatus, Stdio};
 
+/// Refuse early when the TypeScript loader is absent.
+///
+/// Every command that boots the app spawns
+/// `node --import @swc-node/register/esm-register`, resolved from the PROJECT's
+/// node_modules: the CLI is a Rust binary and ships no JS dependencies. Without
+/// the loader Node dies with a raw `ERR_MODULE_NOT_FOUND` naming a package the
+/// user never asked for, from a path inside their app. Saying it here costs one
+/// stat and tells them what to type.
+pub fn require_ts_loader() -> Result<(), String> {
+    if std::path::Path::new("node_modules/@swc-node/register").exists() {
+        return Ok(());
+    }
+    // Declared but absent means the tree is stale, and `pnpm install` is the
+    // fix — telling the user to `add` a dependency they already declared sends
+    // them to edit a manifest that is already right. Same split as `doctor`.
+    let declared = std::fs::read_to_string("package.json")
+        .map(|c| c.contains("@swc-node/register"))
+        .unwrap_or(false);
+    let fix = if declared {
+        "Run `pnpm install` — it is declared in package.json but not installed."
+    } else {
+        "Run `pnpm add -D @swc-node/register`."
+    };
+    Err(format!(
+        "@swc-node/register is required by this command and is not installed.\n  \
+         Ream runs your TypeScript through it.\n  {}",
+        fix
+    ))
+}
+
 fn inherited_status(cmd: &str, args: &[&str]) -> Result<ExitStatus, String> {
     Command::new(cmd)
         .args(args)
@@ -87,6 +117,7 @@ pub fn run_dev() -> Result<(), String> {
     if !std::path::Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
+    require_ts_loader()?;
 
     let assets = read_assets_config()?;
     let Some(watcher) = assets.dev_server else {
@@ -123,6 +154,7 @@ pub fn run_build() -> Result<(), String> {
     if !std::path::Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
+    require_ts_loader()?;
 
     if let Some(build) = read_assets_config()?.build {
         let args: Vec<&str> = build.args.iter().map(String::as_str).collect();
@@ -145,6 +177,7 @@ pub fn run_migration(action: &str) -> Result<(), String> {
     if !std::path::Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
+    require_ts_loader()?;
     if !std::path::Path::new("database/migrations").exists() {
         return Err("database/migrations/ directory not found — run 'ream make:migration' to create your first migration".to_string());
     }
@@ -232,6 +265,7 @@ pub fn run_repl() -> Result<(), String> {
     if !std::path::Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
+    require_ts_loader()?;
     if !std::path::Path::new("reamrc.ts").exists() {
         return Err("reamrc.ts not found — `ream repl` boots the app from the rc file".to_string());
     }
@@ -563,6 +597,7 @@ pub fn run_console(argv: &[String]) -> Result<(), String> {
     if !std::path::Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
+    require_ts_loader()?;
 
     let status = if std::path::Path::new("bin/console.ts").exists() {
         let mut args: Vec<&str> = vec![
@@ -887,6 +922,7 @@ pub fn run_inspect() -> Result<(), String> {
     if !std::path::Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
+    require_ts_loader()?;
     if !std::path::Path::new("reamrc.ts").exists() {
         return Err("reamrc.ts not found — inspect requires a Ream framework project".to_string());
     }
@@ -949,6 +985,7 @@ pub fn run_schedule_list() -> Result<(), String> {
     if !std::path::Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
+    require_ts_loader()?;
     if !std::path::Path::new("reamrc.ts").exists() {
         return Err(
             "reamrc.ts not found — schedule:list requires a Ream framework project".to_string(),
@@ -1033,6 +1070,7 @@ pub fn run_schedule_run(name: &str) -> Result<(), String> {
     if !std::path::Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
+    require_ts_loader()?;
     if !std::path::Path::new("reamrc.ts").exists() {
         return Err(
             "reamrc.ts not found — schedule:run requires a Ream framework project".to_string(),
@@ -1173,6 +1211,7 @@ pub fn run_tests(
     if !std::path::Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
+    require_ts_loader()?;
     if !std::path::Path::new("reamrc.ts").exists() {
         return Err(
             "reamrc.ts not found — `ream test` reads its suites from the rc file".to_string(),
