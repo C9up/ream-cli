@@ -197,9 +197,7 @@ pub fn run_migration_for(action: &str, only: Option<&str>) -> Result<(), String>
     }
     require_ts_loader()?;
     if !std::path::Path::new("reamrc.ts").exists() {
-        return Err(
-            "reamrc.ts not found — migrations boot the app from the rc file".to_string(),
-        );
+        return Err("reamrc.ts not found — migrations boot the app from the rc file".to_string());
     }
 
     let runner_action = match action {
