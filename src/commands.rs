@@ -11,13 +11,19 @@ use std::process::{Command, ExitStatus, Stdio};
 /// user never asked for, from a path inside their app. Saying it here costs one
 /// stat and tells them what to type.
 pub fn require_ts_loader() -> Result<(), String> {
-    if std::path::Path::new("node_modules/@swc-node/register").exists() {
+    require_ts_loader_at(std::path::Path::new("."))
+}
+
+/// The rooted form, so the guard can be tested without moving the process CWD —
+/// which would race every other test in the binary.
+pub fn require_ts_loader_at(root: &std::path::Path) -> Result<(), String> {
+    if root.join("node_modules/@swc-node/register").exists() {
         return Ok(());
     }
     // Declared but absent means the tree is stale, and `pnpm install` is the
     // fix — telling the user to `add` a dependency they already declared sends
     // them to edit a manifest that is already right. Same split as `doctor`.
-    let declared = std::fs::read_to_string("package.json")
+    let declared = std::fs::read_to_string(root.join("package.json"))
         .map(|c| c.contains("@swc-node/register"))
         .unwrap_or(false);
     let fix = if declared {
@@ -1603,5 +1609,65 @@ mod tests {
     fn migration_script_skips_the_boot_migration() {
         let source = include_str!("commands.rs");
         assert!(source.contains("REAM_SKIP_BOOT_MIGRATE"));
+    }
+
+    /// A unique directory under the system temp dir, as `doctor`'s tests use.
+    fn loader_fixture(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ream-loader-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        dir
+    }
+
+    #[test]
+    fn ts_loader_guard_lets_an_installed_project_through() {
+        let dir = loader_fixture("installed");
+        std::fs::create_dir_all(dir.join("node_modules/@swc-node/register")).unwrap();
+        assert!(require_ts_loader_at(&dir).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ts_loader_guard_says_what_to_install_instead_of_err_module_not_found() {
+        let dir = loader_fixture("absent");
+        std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
+
+        let err = require_ts_loader_at(&dir).unwrap_err();
+        // The point of the guard: Node's own message names a package the user
+        // never asked for, from a path inside their app.
+        assert!(err.contains("@swc-node/register is required by this command"));
+        assert!(err.contains("pnpm add -D @swc-node/register"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ts_loader_guard_tells_a_stale_tree_to_install_not_to_add() {
+        let dir = loader_fixture("declared");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"devDependencies":{"@swc-node/register":"^1"}}"#,
+        )
+        .unwrap();
+
+        let err = require_ts_loader_at(&dir).unwrap_err();
+        assert!(err.contains("pnpm install"));
+        assert!(!err.contains("pnpm add -D"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The guard is worth nothing on a command that never calls it. This pins
+    /// the count so a new app-booting command cannot quietly skip it.
+    #[test]
+    fn every_app_booting_command_calls_the_loader_guard() {
+        let source = include_str!("commands.rs");
+        // The pattern carries its leading indentation and trailing semicolon so
+        // this assertion does not count the literal on this very line — the file
+        // is read back through include_str!.
+        let calls = source.matches("\n    require_ts_loader()?;").count();
+        assert_eq!(
+            calls, 9,
+            "expected the 9 app-booting commands to guard on the TypeScript loader; \
+             if you added or removed one, update this count deliberately"
+        );
     }
 }
