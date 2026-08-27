@@ -243,17 +243,29 @@ enum Commands {
         flags: GenFlags,
     },
 
-    /// Run pending database migrations
+    /// Run pending migrations, for every registered store
     #[command(name = "migrate")]
-    Migrate,
+    Migrate {
+        /// Only this store (e.g. `atlas`, `eon`). Default: every registered one.
+        #[arg(long)]
+        only: Option<String>,
+    },
 
     /// Rollback the last batch of migrations
     #[command(name = "migrate:rollback")]
-    MigrateRollback,
+    MigrateRollback {
+        /// Only this store (e.g. `atlas`, `eon`). Default: every registered one.
+        #[arg(long)]
+        only: Option<String>,
+    },
 
     /// Show migration status
     #[command(name = "migrate:status")]
-    MigrateStatus,
+    MigrateStatus {
+        /// Only this store (e.g. `atlas`, `eon`). Default: every registered one.
+        #[arg(long)]
+        only: Option<String>,
+    },
 
     /// Configure a package (auto-setup provider, config, env)
     Configure {
@@ -424,9 +436,9 @@ fn native_command_name(command: &Commands) -> Option<&'static str> {
         Commands::Start => Some("start"),
         Commands::Build => Some("build"),
         Commands::Test { .. } => Some("test"),
-        Commands::Migrate => Some("migrate"),
-        Commands::MigrateRollback => Some("migrate:rollback"),
-        Commands::MigrateStatus => Some("migrate:status"),
+        Commands::Migrate { .. } => Some("migrate"),
+        Commands::MigrateRollback { .. } => Some("migrate:rollback"),
+        Commands::MigrateStatus { .. } => Some("migrate:status"),
         Commands::Inspect => Some("inspect"),
         Commands::ScheduleList => Some("schedule:list"),
         Commands::ScheduleRun { .. } => Some("schedule:run"),
@@ -557,9 +569,15 @@ fn main() {
         Commands::MakeModule { module, name, flags } => {
             generator::make_module(&module, &name, flags.dry_run, flags.force)
         }
-        Commands::Migrate => commands::run_migration("migrate"),
-        Commands::MigrateRollback => commands::run_migration("migrate:rollback"),
-        Commands::MigrateStatus => commands::run_migration("migrate:status"),
+        Commands::Migrate { only } => {
+            commands::run_migration_for("migrate", only.as_deref())
+        }
+        Commands::MigrateRollback { only } => {
+            commands::run_migration_for("migrate:rollback", only.as_deref())
+        }
+        Commands::MigrateStatus { only } => {
+            commands::run_migration_for("migrate:status", only.as_deref())
+        }
         Commands::Configure { package, force, flags } => add::parse_flag_pairs(&flags)
             .and_then(|pairs| match codemods::configure_with_flags(&package, force, &pairs)? {
                 codemods::ConfigureOutcome::Configured => Ok(()),

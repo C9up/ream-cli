@@ -179,65 +179,130 @@ pub fn run_build() -> Result<(), String> {
 
 /// Run a migration command via Node.js inline script.
 /// Boots the app, resolves db from the container, creates a MigrationRunner, and delegates.
-pub fn run_migration(action: &str) -> Result<(), String> {
+/// Drive every registered migration source, or one named with `--only`.
+///
+/// REAM PARTICULARITY, deliberate — this used to `import { MigrationRunner }
+/// from '@c9up/atlas'` and point at `database/migrations`. The CLI is a Rust
+/// binary published apart from the packages, so every package name it knew was
+/// a version coupling: shipping a new store meant shipping a new CLI. It also
+/// meant an app with only a time-series store could not migrate at all, since
+/// the command refused to start without `database/migrations/`.
+///
+/// Each store now registers its runner in the app's `migrations` registry and
+/// the CLI names none of them. AdonisJS has no equivalent because Lucid is its
+/// only migration source; Ream expects several in one app.
+pub fn run_migration_for(action: &str, only: Option<&str>) -> Result<(), String> {
     if !std::path::Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
     require_ts_loader()?;
-    if !std::path::Path::new("database/migrations").exists() {
-        return Err("database/migrations/ directory not found — run 'ream make:migration' to create your first migration".to_string());
+    if !std::path::Path::new("reamrc.ts").exists() {
+        return Err(
+            "reamrc.ts not found — migrations boot the app from the rc file".to_string(),
+        );
     }
 
     let runner_action = match action {
         "migrate" => {
             r#"
-            const executed = await runner.migrate();
-            if (executed.length === 0) { console.log('  Nothing to migrate.'); }
-            else { for (const n of executed) console.log('  migrated:', n); }
+            const executed = await source.runner.migrate();
+            if (executed.length === 0) { console.log(`  [${source.name}] nothing to migrate.`); }
+            else { for (const n of executed) console.log(`  [${source.name}] migrated:`, n); }
         "#
         }
         "migrate:rollback" => {
             r#"
-            const rolled = await runner.rollback();
-            if (rolled.length === 0) { console.log('  Nothing to rollback.'); }
-            else { for (const n of rolled) console.log('  rolled back:', n); }
+            const rolled = await source.runner.rollback();
+            if (rolled.length === 0) { console.log(`  [${source.name}] nothing to rollback.`); }
+            else { for (const n of rolled) console.log(`  [${source.name}] rolled back:`, n); }
         "#
         }
         "migrate:status" => {
             r#"
-            const statuses = await runner.status();
-            if (statuses.length === 0) { console.log('  No migrations found.'); }
-            else { for (const s of statuses) console.log(`  ${s.status === 'applied' ? '✓' : '○'} ${s.name}${s.batch ? ' (batch ' + s.batch + ')' : ''}`); }
+            const statuses = await source.runner.status();
+            if (statuses.length === 0) { console.log(`  [${source.name}] no migrations found.`); }
+            else { for (const s of statuses) console.log(`  [${source.name}] ${s.status === 'applied' ? '\u2713' : '\u25cb'} ${s.name}${s.batch ? ' (batch ' + s.batch + ')' : ''}`); }
         "#
         }
         _ => return Err(format!("Unknown migration action: {}", action)),
+    };
+
+    // `serde_json::to_string` of a &str IS a valid JS string literal, so the
+    // selector never participates in JS-source parsing as code.
+    let only_literal = match only {
+        Some(name) => serde_json::to_string(name)
+            .map_err(|e| format!("Failed to encode --only literal: {}", e))?,
+        None => "null".to_string(),
     };
 
     let script = format!(
         r#"
         import 'reflect-metadata';
         import {{ Ignitor }} from '@c9up/ream';
-        import {{ MigrationRunner }} from '@c9up/atlas';
-        // We drive migrations explicitly below — tell AtlasProvider NOT to also
-        // auto-migrate on boot (it would double-apply, and re-apply right before
-        // a rollback/status pass). Must be set before .start() boots providers.
+        // We drive migrations explicitly below — tell a data provider NOT to
+        // also auto-migrate on boot (it would double-apply, and re-apply right
+        // before a rollback/status pass). Must be set before .start().
         process.env.REAM_SKIP_BOOT_MIGRATE = '1';
         const rc = (await import('./reamrc.ts')).default;
         const app = await new Ignitor(new URL('./', import.meta.url))
             .useRcFile(rc).setEnvironment('console').start();
-        // `container.resolve` is ASYNC (ream's container mirrors Adonis fold).
-        // Without the await, `db` is a Promise: `db.dialect` reads undefined and
-        // the runner fails with "db.execute is not a function".
-        const db = await app.getApp().container.resolve('db');
-        const runner = new MigrationRunner(db, {{ migrationsDir: 'database/migrations', dialect: db.dialect }});
-        {}
+        const container = app.getApp().container;
+
+        // No binding at all means the app is on a ream that predates the
+        // registry — a different problem from "no store registered", and the
+        // only one the user fixes by upgrading. Saying so beats a stack trace
+        // naming a token they have never heard of.
+        if (typeof container.has !== 'function' || !container.has('migrations')) {{
+            console.error('This app has no migration registry.');
+            console.error('  `ream migrate` drives whatever a data package registers under the');
+            console.error('  `migrations` binding, which @c9up/ream provides from 0.2.0 on.');
+            console.error('  Upgrade ream: pnpm add @c9up/ream@latest');
+            await app.stop();
+            process.exit(1);
+        }}
+
+        const registry = await container.resolve('migrations');
+        const only = {only};
+        let sources = registry.all();
+
+        if (only !== null) {{
+            const picked = registry.get(only);
+            if (!picked) {{
+                const names = registry.names();
+                console.error(`No migration source named '${{only}}'.`);
+                console.error(names.length > 0
+                    ? `  Registered: ${{names.join(', ')}}`
+                    : '  No data package registered one. Is its provider in reamrc.ts?');
+                await app.stop();
+                process.exit(1);
+            }}
+            sources = [picked];
+        }}
+
+        if (sources.length === 0) {{
+            // An empty registry is not an error: an app may legitimately have no
+            // data package yet. Say which thing is missing rather than failing.
+            console.log('  No migration source registered.');
+            console.log('  A data package registers one from its provider — check reamrc.ts.');
+            await app.stop();
+            process.exit(0);
+        }}
+
+        // Sequential, not concurrent: two stores sharing a database server would
+        // otherwise contend on locks, and interleaved output makes a failure
+        // impossible to attribute.
+        for (const source of sources) {{
+            {action}
+        }}
+
         await app.stop();
-        // Force-exit: app.stop() doesn't close app-owned handles (atlas pool,
-        // an ioredis client built when config loads), so the event loop would
+        // Force-exit: app.stop() doesn't close app-owned handles (a pool, an
+        // ioredis client built when config loads), so the event loop would
         // otherwise stay alive and the one-shot command would hang (exit 124).
         process.exit(0);
     "#,
-        runner_action
+        only = only_literal,
+        action = runner_action
     );
 
     let status = inherited_status(
@@ -1653,6 +1718,76 @@ mod tests {
         assert!(err.contains("pnpm install"));
         assert!(!err.contains("pnpm add -D"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn migration_script_names_no_data_package() {
+        let source = include_str!("commands.rs");
+        let start = source
+            .find("pub fn run_migration_for")
+            .expect("run_migration_for");
+        let end = source[start..]
+            .find("fn inherited_status")
+            .map(|i| start + i)
+            .unwrap_or(source.len());
+        let body = &source[start..end];
+
+        // The whole point: the CLI ships apart from the packages, so any package
+        // name it knows is a version coupling. It used to import
+        // `MigrationRunner` from '@c9up/atlas' and hardcode 'database/migrations'.
+        assert!(!body.contains("@c9up/atlas"));
+        assert!(!body.contains("@c9up/eon"));
+        assert!(!body.contains("database/migrations"));
+        assert!(body.contains("container.resolve('migrations')"));
+    }
+
+    #[test]
+    fn migration_script_tells_an_old_ream_apart_from_an_empty_registry() {
+        let source = include_str!("commands.rs");
+        // Two different failures, two different messages. A missing binding is
+        // fixed by upgrading ream; an empty registry is fixed by adding a
+        // provider. Reporting them the same way sends the user to the wrong file.
+        assert!(source.contains("This app has no migration registry."));
+        assert!(source.contains("pnpm add @c9up/ream@latest"));
+        assert!(source.contains("No migration source registered."));
+    }
+
+    #[test]
+    fn migration_script_runs_sources_sequentially() {
+        let source = include_str!("commands.rs");
+        let start = source
+            .find("pub fn run_migration_for")
+            .expect("run_migration_for");
+        let end = source[start..]
+            .find("fn inherited_status")
+            .map(|i| start + i)
+            .unwrap_or(source.len());
+        let body = &source[start..end];
+
+        // Scoped to the function body, not the whole file: this assertion's own
+        // literal lives in the same file, read back through include_str!.
+        // Concurrent runs would contend on locks when two stores share a server,
+        // and interleaved output makes a failure impossible to attribute.
+        assert!(body.contains("for (const source of sources)"));
+        assert!(!body.contains("Promise.all"));
+    }
+
+    #[test]
+    fn migration_selector_is_encoded_as_a_json_literal() {
+        // The selector reaches an inline JS script. A JSON string IS a valid JS
+        // string literal, so what matters is that the DELIMITER and the escapes
+        // are intact — a single quote inside a double-quoted literal is inert
+        // and does not need escaping.
+        let encoded = serde_json::to_string("atlas\"; process.exit(1); //").unwrap();
+        assert!(encoded.starts_with('"') && encoded.ends_with('"'));
+        // The injected double quote must come back escaped, so it cannot close
+        // the literal and start executing.
+        assert!(encoded.contains("\\\""));
+        assert!(!encoded.contains("atlas\"; process"));
+
+        // A newline cannot be left raw either: it would terminate the JS line.
+        let multiline = serde_json::to_string("a\nb").unwrap();
+        assert_eq!(multiline, "\"a\\nb\"");
     }
 
     /// The guard is worth nothing on a command that never calls it. This pins
