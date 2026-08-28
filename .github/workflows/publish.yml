@@ -154,7 +154,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: read
+      # write, not read: the release step needs to create one.
+      contents: write
       id-token: write
     steps:
       - name: Verify NPM_TOKEN secret
@@ -262,3 +263,28 @@ jobs:
           cp README.md npm/ream-cli/README.md
 
           cd npm/ream-cli && npm publish --access public
+      - name: Create the GitHub release
+        # Notes from the commits this tag contains. Without it a published
+        # version arrives with no explanation of what changed, and the only way
+        # to find out is to read a diff.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "::notice::not built from a tag - no release to create"
+            exit 0
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::notice::release $tag already exists - leaving it alone"
+            exit 0
+          fi
+          prev="$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)"
+          range="${tag}"
+          [ -n "$prev" ] && range="${prev}..${tag}"
+          notes="$(git log "$range" --no-merges --format='### %s%n%n%b%n' \
+            | grep -vE '^### [a-z0-9@/.-]+ [0-9]+\.[0-9]+\.[0-9]+$' || true)"
+          [ -z "${notes// }" ] && notes="_Version bump only - no behavioural change._"
+          [ -n "$prev" ] && notes="${notes}"$'\n\n---\n\n'"Changes since \`${prev}\`."
+          printf '%s\n' "$notes" | gh release create "$tag" --title "$tag" --notes-file -
