@@ -10,7 +10,6 @@ mod dev;
 mod doctor;
 mod generator;
 mod mcp;
-mod nebula;
 mod nova;
 mod scaffold;
 mod stubs;
@@ -301,34 +300,6 @@ enum Commands {
     ScheduleRun {
         /// Task name as printed by `ream schedule:list`
         name: String,
-    },
-
-    /// Copy nebula components into the project (they become yours to edit)
-    #[command(name = "nebula:add")]
-    NebulaAdd {
-        /// Component names, as `ream nebula:list` prints them
-        #[arg(required = true)]
-        components: Vec<String>,
-        /// Overwrite files that already exist
-        #[arg(long, default_value_t = false)]
-        force: bool,
-        /// Print what would happen and write nothing
-        #[arg(long = "dry-run", default_value_t = false)]
-        dry_run: bool,
-        /// Copy TypeScript sources instead of the compiled output
-        #[arg(long, conflicts_with = "js", default_value_t = false)]
-        ts: bool,
-        /// Copy the compiled JavaScript (the default for an unbuilt Aurora app)
-        #[arg(long, default_value_t = false)]
-        js: bool,
-    },
-
-    /// List the nebula components available to `ream nebula:add`
-    #[command(name = "nebula:list")]
-    NebulaList {
-        /// Restrict to one atomic layer
-        #[arg(long)]
-        layer: Option<String>,
     },
 
     /// Generate a VAPID key pair for Web Push (writes NOVA_VAPID_* into .env)
@@ -626,25 +597,6 @@ fn main() {
         Commands::Inspect => commands::run_inspect(),
         Commands::ScheduleList => commands::run_schedule_list(),
         Commands::ScheduleRun { name } => commands::run_schedule_run(&name),
-        Commands::NebulaAdd {
-            components,
-            force,
-            dry_run,
-            ts,
-            js,
-        } => nebula::run_add(
-            &components,
-            force,
-            dry_run,
-            if ts {
-                Some("ts")
-            } else if js {
-                Some("js")
-            } else {
-                None
-            },
-        ),
-        Commands::NebulaList { layer } => nebula::run_list(layer.as_deref()),
 
         Commands::NovaVapidGenerate { force } => nova::run_vapid_generate(force),
         Commands::GenerateKey { force, show } => commands::run_generate_key(force, show),
