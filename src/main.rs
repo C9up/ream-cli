@@ -217,23 +217,6 @@ enum Commands {
         force: bool,
     },
 
-    /// Generate a database migration
-    #[command(name = "make:migration")]
-    MakeMigration {
-        name: String,
-        #[command(flatten)]
-        flags: GenFlags,
-    },
-
-    /// Generate a database seeder
-    #[command(name = "make:seeder")]
-    MakeSeeder {
-        module: String,
-        name: String,
-        #[command(flatten)]
-        flags: GenFlags,
-    },
-
     /// Generate a full resource module (entity + controller + validator + migration)
     #[command(name = "make:module")]
     MakeModule {
@@ -241,30 +224,6 @@ enum Commands {
         name: String,
         #[command(flatten)]
         flags: GenFlags,
-    },
-
-    /// Run pending migrations, for every registered store
-    #[command(name = "migrate")]
-    Migrate {
-        /// Only this store (e.g. `atlas`, `eon`). Default: every registered one.
-        #[arg(long)]
-        only: Option<String>,
-    },
-
-    /// Rollback the last batch of migrations
-    #[command(name = "migrate:rollback")]
-    MigrateRollback {
-        /// Only this store (e.g. `atlas`, `eon`). Default: every registered one.
-        #[arg(long)]
-        only: Option<String>,
-    },
-
-    /// Show migration status
-    #[command(name = "migrate:status")]
-    MigrateStatus {
-        /// Only this store (e.g. `atlas`, `eon`). Default: every registered one.
-        #[arg(long)]
-        only: Option<String>,
     },
 
     /// Configure a package (auto-setup provider, config, env)
@@ -290,17 +249,6 @@ enum Commands {
 
     /// Inspect the registered routes, providers, and decorated services
     Inspect,
-
-    /// List every registered scheduled task (cron expression, next/last run, stats)
-    #[command(name = "schedule:list")]
-    ScheduleList,
-
-    /// Run a registered scheduled task once immediately (admin override — bypasses the distributed lock)
-    #[command(name = "schedule:run")]
-    ScheduleRun {
-        /// Task name as printed by `ream schedule:list`
-        name: String,
-    },
 
     /// Generate a fresh APP_KEY and write it into .env
     #[command(name = "generate:key")]
@@ -428,12 +376,7 @@ fn native_command_name(command: &Commands) -> Option<&'static str> {
         Commands::Start => Some("start"),
         Commands::Build => Some("build"),
         Commands::Test { .. } => Some("test"),
-        Commands::Migrate { .. } => Some("migrate"),
-        Commands::MigrateRollback { .. } => Some("migrate:rollback"),
-        Commands::MigrateStatus { .. } => Some("migrate:status"),
         Commands::Inspect => Some("inspect"),
-        Commands::ScheduleList => Some("schedule:list"),
-        Commands::ScheduleRun { .. } => Some("schedule:run"),
         Commands::Doctor => Some("doctor"),
         Commands::Info => Some("info"),
         Commands::Repl => Some("repl"),
@@ -552,23 +495,8 @@ fn main() {
                 stubs::publish(kind.as_deref(), &generator::built_in_stub, force)
             }
         }
-        Commands::MakeMigration { name, flags } => {
-            generator::make("migration", "", &name, flags.dry_run, flags.force)
-        }
-        Commands::MakeSeeder { module, name, flags } => {
-            generator::make("seeder", &module, &name, flags.dry_run, flags.force)
-        }
         Commands::MakeModule { module, name, flags } => {
             generator::make_module(&module, &name, flags.dry_run, flags.force)
-        }
-        Commands::Migrate { only } => {
-            commands::run_migration_for("migrate", only.as_deref())
-        }
-        Commands::MigrateRollback { only } => {
-            commands::run_migration_for("migrate:rollback", only.as_deref())
-        }
-        Commands::MigrateStatus { only } => {
-            commands::run_migration_for("migrate:status", only.as_deref())
         }
         Commands::Configure { package, force, flags } => add::parse_flag_pairs(&flags)
             .and_then(|pairs| match codemods::configure_with_flags(&package, force, &pairs)? {
@@ -587,8 +515,6 @@ fn main() {
         },
         Commands::Doctor => doctor::run(),
         Commands::Inspect => commands::run_inspect(),
-        Commands::ScheduleList => commands::run_schedule_list(),
-        Commands::ScheduleRun { name } => commands::run_schedule_run(&name),
 
         Commands::GenerateKey { force, show } => commands::run_generate_key(force, show),
         Commands::Repl => commands::run_repl(),
