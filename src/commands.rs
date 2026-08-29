@@ -399,7 +399,7 @@ pub fn run_repl() -> Result<(), String> {
 /// A scaffolded project ships a placeholder; leaving it in place means cookies,
 /// sessions and CSRF tokens are signed with a value that is public knowledge.
 ///
-/// Generation is delegated to Node's `crypto` (as `nova:vapid:generate` does)
+/// Generation is delegated to Node's `crypto` (as the Web Push key generator does)
 /// rather than pulled in as a Rust crypto dependency for one 32-byte draw. The
 /// key is never printed: stdout ends up in shell history, scrollback and CI
 /// logs — the `.env` write is the only sink.
@@ -438,7 +438,7 @@ pub fn run_generate_key(force: bool, show: bool) -> Result<(), String> {
     // The scaffold's placeholder is not a real key, so it must not block.
     const PLACEHOLDER: &str = "change-me-to-a-unique-32+-byte-secret!!";
     if !force {
-        if let Some(value) = crate::nova::read_env_value(&existing, "APP_KEY") {
+        if let Some(value) = crate::envfile::read_env_value(&existing, "APP_KEY") {
             if !value.is_empty() && value != PLACEHOLDER {
                 return Err("APP_KEY is already set in .env.\n  \
                      Re-run with --force to replace it — every existing cookie, \
@@ -449,7 +449,7 @@ pub fn run_generate_key(force: bool, show: bool) -> Result<(), String> {
     }
 
     let key = generate_app_key()?;
-    let updated = crate::nova::upsert_env_var(&existing, "APP_KEY", &key);
+    let updated = crate::envfile::upsert_env_var(&existing, "APP_KEY", &key);
     std::fs::write(env_path, updated).map_err(|e| format!("Failed to write .env: {}", e))?;
 
     println!();

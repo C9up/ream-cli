@@ -8,9 +8,9 @@ mod codemods;
 mod commands;
 mod dev;
 mod doctor;
+mod envfile;
 mod generator;
 mod mcp;
-mod nova;
 mod scaffold;
 mod stubs;
 mod template;
@@ -302,14 +302,6 @@ enum Commands {
         name: String,
     },
 
-    /// Generate a VAPID key pair for Web Push (writes NOVA_VAPID_* into .env)
-    #[command(name = "nova:vapid:generate")]
-    NovaVapidGenerate {
-        /// Overwrite an existing NOVA_VAPID_PRIVATE_KEY value
-        #[arg(long, default_value_t = false)]
-        force: bool,
-    },
-
     /// Generate a fresh APP_KEY and write it into .env
     #[command(name = "generate:key")]
     GenerateKey {
@@ -598,7 +590,6 @@ fn main() {
         Commands::ScheduleList => commands::run_schedule_list(),
         Commands::ScheduleRun { name } => commands::run_schedule_run(&name),
 
-        Commands::NovaVapidGenerate { force } => nova::run_vapid_generate(force),
         Commands::GenerateKey { force, show } => commands::run_generate_key(force, show),
         Commands::Repl => commands::run_repl(),
         Commands::Info => commands::info(),
