@@ -72,7 +72,15 @@ pub fn run(name: &str, options: &NewOptions<'_>) -> Result<(), String> {
     write_file(root, "tsconfig.json", &tsconfig())?;
     write_file(root, ".swcrc", &swcrc())?;
     write_file(root, ".env", &env_file(name, database))?;
-    write_file(root, "env.ts", &env_typing(database))?;
+    // The environment's TYPES come from `start/env.ts` — `Env.create` returns a
+    // typed accessor, so `env.get('PORT')` is a number without a second
+    // hand-maintained declaration to keep in step with the schema.
+    //
+    // The microservice template runs a standalone entry with no rc file and no
+    // Ignitor, so nothing there would import it.
+    if template != "microservice" {
+        write_file(root, "start/env.ts", &start_env(database))?;
+    }
     write_file(root, ".gitignore", GITIGNORE)?;
     write_file(root, "reamrc.ts", &reamrc(template))?;
     // Console entry. The microservice template runs a standalone bin/server.ts
@@ -189,6 +197,14 @@ const IMPORTER = (filePath: string) =>
     : import(filePath)
 
 new Ignitor(APP_ROOT, { importer: IMPORTER })
+  .tap((app) => {
+    // Validates the environment against start/env.ts before anything boots, so
+    // a missing APP_KEY stops the app here rather than on the first response
+    // that tries to sign a cookie.
+    app.booting(async () => {
+      await import('#start/env.js')
+    })
+  })
   .useRcFile((await import('../reamrc.js')).default)
   .console()
   .handle(process.argv.slice(2))
@@ -250,11 +266,23 @@ fn swcrc() -> String {
     "{\n  \"extends\": \"@c9up/ream/swcrc.app.json\"\n}\n".to_string()
 }
 
+/// Written only when a key cannot be generated. The framework's cookie signer
+/// refuses it outright, so it never becomes a live signing key.
+pub const PLACEHOLDER_APP_KEY: &str = "change-me-to-a-unique-32+-byte-secret!!";
+
 fn env_file(name: &str, database: &str) -> String {
     let db_name = name.replace('-', "_");
-    // APP_KEY signs cookies, sessions, and CSRF tokens. Placeholder here — change
-    // it to a unique 32+ byte secret per app/environment before going to prod.
-    let app_key = "APP_KEY=change-me-to-a-unique-32+-byte-secret!!\n";
+    // APP_KEY signs cookies, sessions and CSRF tokens, so every app gets its OWN
+    // random key at creation — the way `generate:key` mints one. A shared
+    // placeholder would mean every scaffolded app signs with a value anybody
+    // can read in this repository, which is not a secret at all.
+    //
+    // If node cannot be reached the placeholder is written instead: refusing to
+    // create the project over it would be worse, and the cookie signer refuses
+    // this exact value, so it cannot quietly reach production.
+    let generated = crate::commands::generate_app_key().unwrap_or_else(|_| PLACEHOLDER_APP_KEY.to_string());
+    let app_key = format!("APP_KEY={}\n", generated);
+    let app_key = app_key.as_str();
     if database == "postgres" {
         format!("APP_NAME={}\n{}NODE_ENV=development\nPORT=3000\n\nDB_CONNECTION=postgres\nDB_HOST=localhost\nDB_PORT=5432\nDB_DATABASE={}\nDB_USER=postgres\nDB_PASSWORD=secret\n", name, app_key, db_name)
     } else {
@@ -262,14 +290,26 @@ fn env_file(name: &str, database: &str) -> String {
     }
 }
 
-fn env_typing(database: &str) -> String {
+/// `start/env.ts` — the runtime validation of the environment, in the shape the
+/// framework's `Env.create` expects.
+///
+/// This is what makes a missing `APP_KEY` a boot failure rather than a surprise
+/// on the first response that tries to sign a cookie. Config files read their
+/// values through it (`import env from '#start/env'`), which also loads the
+/// `.env` files as an import side-effect, in every flow — server, console and
+/// tests alike.
+fn start_env(database: &str) -> String {
     let db_vars = if database == "postgres" {
-        "  DB_CONNECTION: 'postgres' | 'sqlite'\n  DB_HOST: string\n  DB_PORT: string\n  DB_DATABASE: string\n  DB_USER: string\n  DB_PASSWORD: string"
+        "  DB_CONNECTION: Env.schema.enum(['postgres', 'sqlite'] as const),\n  DB_HOST: Env.schema.string({ format: 'host' }),\n  DB_PORT: Env.schema.number(),\n  DB_DATABASE: Env.schema.string(),\n  DB_USER: Env.schema.string(),\n  DB_PASSWORD: Env.schema.string.optional(),"
     } else {
-        "  DB_CONNECTION: 'postgres' | 'sqlite'\n  DB_FILENAME: string"
+        "  DB_CONNECTION: Env.schema.enum(['postgres', 'sqlite'] as const),\n  DB_FILENAME: Env.schema.string(),"
     };
-    format!("export interface Env {{\n  APP_NAME: string\n  APP_KEY: string\n  NODE_ENV: 'development' | 'production' | 'test'\n  PORT: string\n{}\n}}\n\ndeclare global {{\n  namespace NodeJS {{\n    interface ProcessEnv extends Env {{}}\n  }}\n}}\n", db_vars)
+    format!(
+        "import {{ Env }} from '@c9up/ream'\n\nexport default await Env.create(new URL('../', import.meta.url), {{\n  APP_NAME: Env.schema.string(),\n  // Signs cookies, sessions and CSRF tokens. Required: without it the app\n  // refuses to start, rather than serving unsigned values that read as signed.\n  APP_KEY: Env.schema.string(),\n  NODE_ENV: Env.schema.enum(['development', 'production', 'test'] as const),\n  PORT: Env.schema.number(),\n{}\n}})\n",
+        db_vars
+    )
 }
+
 
 fn reamrc(template: &str) -> String {
     // slim AND microservice get an empty reamrc: the microservice template only
@@ -277,7 +317,10 @@ fn reamrc(template: &str) -> String {
     // creates #start/routes, #start/kernel, or providers/AppProvider — so the
     // non-slim preloads would fail to resolve for any reamrc-driven command
     // (audit 2026-06-13).
-    if template == "slim" || template == "microservice" {
+    if template == "microservice" {
+        return "import { defineConfig } from '@c9up/ream'\n\nexport default defineConfig({\n  providers: [],\n  preloads: [],\n})\n".to_string();
+    }
+    if template == "slim" {
         return "import { defineConfig } from '@c9up/ream'\n\nexport default defineConfig({\n  providers: [],\n  preloads: [],\n})\n".to_string();
     }
     // The web template pre-wires the session/cookie auth kit: sigil (hashing),
@@ -296,7 +339,7 @@ fn write_app_base(root: &Path, name: &str) -> Result<(), String> {
     write_file(
         root,
         "bin/server.ts",
-        "import 'reflect-metadata'\nimport { Ignitor, prettyPrintError } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\nconst APP_ROOT = new URL('../', import.meta.url)\n\nnew Ignitor(APP_ROOT, {\n  port: Number(process.env.PORT ?? 3000),\n  serverFactory: createHyperServerFactory(),\n})\n  .useRcFile((await import('../reamrc.js')).default)\n  .httpServer()\n  .start()\n  .then((app) => {\n    const port = Number(process.env.PORT ?? 3000)\n    console.log(`\\n  ➜ Ream ready on http://${app.host()}:${port}\\n`)\n  })\n  .catch((err) => {\n    prettyPrintError(err)\n    process.exit(1)\n  })\n",
+        "import 'reflect-metadata'\nimport { Ignitor, prettyPrintError } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\nconst APP_ROOT = new URL('../', import.meta.url)\n\nnew Ignitor(APP_ROOT, {\n  port: Number(process.env.PORT ?? 3000),\n  serverFactory: createHyperServerFactory(),\n})\n  .tap((app) => {\n    // Validates the environment against start/env.ts before anything boots,\n    // so a missing APP_KEY stops the app here rather than on the first\n    // response that tries to sign a cookie.\n    app.booting(async () => {\n      await import('#start/env.js')\n    })\n  })\n  .useRcFile((await import('../reamrc.js')).default)\n  .httpServer()\n  .start()\n  .then((app) => {\n    const port = Number(process.env.PORT ?? 3000)\n    console.log(`\\n  ➜ Ream ready on http://${app.host()}:${port}\\n`)\n  })\n  .catch((err) => {\n    prettyPrintError(err)\n    process.exit(1)\n  })\n",
     )?;
     write_file(root, "providers/AppProvider.ts", "import { Provider } from '@c9up/ream'\n\nexport default class AppProvider extends Provider {\n  register() {}\n  async boot() {}\n  async start() {}\n  async ready() {}\n  async shutdown() {}\n}\n")?;
     write_file(root, "start/routes.ts", &format!("import router from '@c9up/ream/services/router'\n\nrouter.get('/', async ({{ response }}) => {{\n  response.status(200).json({{ name: '{}', status: 'running' }})\n}})\n", name))?;
@@ -322,17 +365,20 @@ fn write_web_template(root: &Path, name: &str) -> Result<(), String> {
     write_file(
         root,
         "start/kernel.ts",
-        r#"import { blackholeMiddleware } from '@c9up/blackhole/middleware'
+        r#"import env from '#start/env'
+import { blackholeMiddleware } from '@c9up/blackhole/middleware'
 import { BodyParserMiddleware, SessionMiddleware } from '@c9up/ream'
 import router from '@c9up/ream/services/router'
 
 const bodyParser = new BodyParserMiddleware()
 
-// Cookie session (stateless — data lives in the encrypted cookie). Secret is
-// APP_KEY; the dev fallback keeps `ream dev` working before you set one.
+// Cookie session — the data lives in the encrypted cookie, signed with APP_KEY.
 const session = new SessionMiddleware({
   driver: 'cookie',
-  secret: process.env.APP_KEY ?? 'change-me-to-a-unique-32+-byte-secret!!',
+  // Through the validated environment: start/env.ts is what guarantees the
+  // key exists, and reading `process.env` around it returns `undefined` typed
+  // as a string.
+  secret: env.get('APP_KEY'),
 })
 
 router.use([
@@ -369,12 +415,16 @@ export default {
     write_file(
         root,
         "config/blackhole.ts",
-        r#"import { defineConfig } from '@c9up/blackhole/config'
+        r#"import env from '#start/env'
+import { defineConfig } from '@c9up/blackhole/config'
 
 export default defineConfig({
   xss: true,
   csrf: { exceptRoutes: [] },
-  secret: process.env.APP_KEY ?? 'change-me-to-a-unique-32+-byte-secret!!',
+  // Through the validated environment, never `process.env` directly: the
+  // schema in start/env.ts is what guarantees the key is there at all, and
+  // reading around it gives back `string | undefined` typed as a string.
+  secret: env.get('APP_KEY'),
 })
 "#,
     )?;
@@ -430,7 +480,7 @@ fn write_slim_template(root: &Path, _name: &str) -> Result<(), String> {
     write_file(
         root,
         "bin/server.ts",
-        "import { Ignitor } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\nconst app = new Ignitor({\n  port: Number(process.env.PORT ?? 3000),\n  serverFactory: createHyperServerFactory(),\n})\n  .httpServer()\n  .routes((router) => {\n    router.get('/', async ({ response }) => {\n      response.status(200).send('Hello from Ream!')\n    })\n  })\n\nawait app.start()\nconsole.log(`\\n  ➜ Ream ready on http://${app.host()}:${process.env.PORT ?? 3000}\\n`)\n",
+        "import { Ignitor } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\nconst app = new Ignitor({\n  port: Number(process.env.PORT ?? 3000),\n  serverFactory: createHyperServerFactory(),\n})\n  .tap((app) => {\n    // Validates the environment against start/env.ts before anything boots,\n    // so a missing APP_KEY stops the app here rather than on the first\n    // response that tries to sign a cookie.\n    app.booting(async () => {\n      await import('#start/env.js')\n    })\n  })\n  .httpServer()\n  .routes((router) => {\n    router.get('/', async ({ response }) => {\n      response.status(200).send('Hello from Ream!')\n    })\n  })\n\nawait app.start()\nconsole.log(`\\n  ➜ Ream ready on http://${app.host()}:${process.env.PORT ?? 3000}\\n`)\n",
     )?;
     Ok(())
 }
@@ -629,6 +679,58 @@ mod tests {
             "scaffolded .swcrc must extend @c9up/ream/swcrc.app.json — got:\n{}",
             content
         );
+    }
+
+    /// The environment is VALIDATED at boot, the way the framework's own
+    /// `Env.create` is meant to be reached: `start/env.ts` declares the schema,
+    /// and both entries import it from a `booting` hook.
+    ///
+    /// Without this, a missing `APP_KEY` is not a boot failure — it is a
+    /// surprise on the first response that tries to sign a cookie.
+    #[test]
+    fn app_validates_its_environment_at_boot() {
+        let root = unique_root("env-boot");
+        write_api_template(&root, "demo").unwrap();
+        let bin = fs::read_to_string(root.join("bin/server.ts")).unwrap();
+        assert!(
+            bin.contains("app.booting(") && bin.contains("#start/env.js"),
+            "bin/server.ts must import #start/env from a booting hook — got:\n{}",
+            bin
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `start/env.ts` requires APP_KEY, and there is no second hand-maintained
+    /// type declaration to drift from it — the types come from `Env.create`.
+    #[test]
+    fn start_env_requires_the_app_key() {
+        let env = start_env("sqlite");
+        assert!(
+            env.contains("Env.create") && env.contains("APP_KEY: Env.schema.string()"),
+            "start/env.ts must require APP_KEY — got:\n{}",
+            env
+        );
+        assert!(
+            !env.contains("optional"),
+            "APP_KEY must not be optional — got:\n{}",
+            env
+        );
+    }
+
+    /// Every scaffolded app gets its OWN key. A shared placeholder is a signing
+    /// key anybody can read in this repository, which is not a secret at all.
+    #[test]
+    fn each_app_gets_its_own_app_key() {
+        let first = env_file("one", "sqlite");
+        let second = env_file("two", "sqlite");
+        let key_of = |body: &str| {
+            crate::envfile::read_env_value(body, "APP_KEY").expect("APP_KEY must be written")
+        };
+        let a = key_of(&first);
+        let b = key_of(&second);
+        assert_ne!(a, b, "two apps must not share a signing key");
+        assert_ne!(a, PLACEHOLDER_APP_KEY, "the placeholder is not a key");
+        assert!(a.len() >= 32, "key looks too short: {} chars", a.len());
     }
 
     /// `bin/server.ts` for api/web template uses `createHyperServerFactory()`

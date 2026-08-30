@@ -200,7 +200,7 @@ pub fn run_repl() -> Result<(), String> {
         const rc = (await import('./reamrc.ts')).default;
         const ignitor = await new Ignitor(new URL('./', import.meta.url))
             .useRcFile(rc)
-            .setEnvironment('console')
+            .setEnvironment('repl')
             .start();
         const app = ignitor.getApp();
 
@@ -318,7 +318,7 @@ pub fn run_generate_key(force: bool, show: bool) -> Result<(), String> {
 }
 
 /// 32 random bytes, base64url — same shape AdonisJS generates.
-fn generate_app_key() -> Result<String, String> {
+pub fn generate_app_key() -> Result<String, String> {
     let output = Command::new("node")
         .args([
             "--input-type=module",
@@ -854,7 +854,7 @@ pub fn run_inspect() -> Result<(), String> {
         import { Ignitor } from '@c9up/ream';
         const rc = (await import('./reamrc.ts')).default;
         const app = await new Ignitor(new URL('./', import.meta.url))
-            .useRcFile(rc).setEnvironment('console').start();
+            .useRcFile(rc).setEnvironment('console').warmUp();
         const router = await app.getApp().container.resolve('router');
 
         console.log('\nRoutes:');
