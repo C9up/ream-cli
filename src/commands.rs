@@ -900,7 +900,8 @@ pub fn run_inspect() -> Result<(), String> {
             console.log('  (none)');
         } else {
             for (const b of bindings) {
-                console.log(`  ${b.token}  (${b.scope})`);
+                const via = b.target ? ` -> ${b.target}` : '';
+                console.log(`  ${b.token}${via}  (${b.scope})`);
             }
         }
 
