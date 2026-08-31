@@ -280,7 +280,8 @@ fn env_file(name: &str, database: &str) -> String {
     // If node cannot be reached the placeholder is written instead: refusing to
     // create the project over it would be worse, and the cookie signer refuses
     // this exact value, so it cannot quietly reach production.
-    let generated = crate::commands::generate_app_key().unwrap_or_else(|_| PLACEHOLDER_APP_KEY.to_string());
+    let generated =
+        crate::commands::generate_app_key().unwrap_or_else(|_| PLACEHOLDER_APP_KEY.to_string());
     let app_key = format!("APP_KEY={}\n", generated);
     let app_key = app_key.as_str();
     if database == "postgres" {
@@ -309,7 +310,6 @@ fn start_env(database: &str) -> String {
         db_vars
     )
 }
-
 
 fn reamrc(template: &str) -> String {
     // slim AND microservice get an empty reamrc: the microservice template only

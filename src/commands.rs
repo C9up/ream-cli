@@ -261,9 +261,8 @@ pub fn run_repl() -> Result<(), String> {
 /// framework normalises these same aliases everywhere else, so the strict
 /// reading here was the odd one out.
 fn in_production_env() -> bool {
-    std::env::var("NODE_ENV").is_ok_and(|env| {
-        matches!(env.to_lowercase().as_str(), "prod" | "production")
-    })
+    std::env::var("NODE_ENV")
+        .is_ok_and(|env| matches!(env.to_lowercase().as_str(), "prod" | "production"))
 }
 
 /// `generate:key` — write a fresh APP_KEY into `.env`.
