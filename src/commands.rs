@@ -247,6 +247,25 @@ pub fn run_repl() -> Result<(), String> {
     Ok(())
 }
 
+/// Whether this machine says it is production, under any of the spellings
+/// people actually set.
+///
+/// NAMED DEVIATION — upstream's own `generate:key` compares the exact string
+/// (`process.env.NODE_ENV !== "production"`), and this does not.
+///
+/// `NODE_ENV=prod` is ordinary in a Dockerfile or a platform dashboard, and
+/// read exactly it answers "not production": the guard steps aside and the
+/// command rewrites `APP_KEY` on a live box, invalidating every session,
+/// signed cookie and signed URL in circulation. That is not a failure mode
+/// worth reproducing for the sake of matching a string comparison — and the
+/// framework normalises these same aliases everywhere else, so the strict
+/// reading here was the odd one out.
+fn in_production_env() -> bool {
+    std::env::var("NODE_ENV").is_ok_and(|env| {
+        matches!(env.to_lowercase().as_str(), "prod" | "production")
+    })
+}
+
 /// `generate:key` — write a fresh APP_KEY into `.env`.
 ///
 /// A scaffolded project ships a placeholder; leaving it in place means cookies,
@@ -271,7 +290,7 @@ pub fn run_generate_key(force: bool, show: bool) -> Result<(), String> {
     // Adonis guards production: rewriting APP_KEY there invalidates every
     // session and signed URL in circulation, and a deployed .env is usually not
     // the source of truth anyway.
-    let in_production = std::env::var("NODE_ENV").is_ok_and(|env| env == "production");
+    let in_production = in_production_env();
     if in_production && !force {
         return Err(
             "Refusing to write .env in production — every existing session, cookie and \
@@ -1058,6 +1077,33 @@ fn test_options(
 
 #[cfg(test)]
 mod tests {
+    /// `generate:key` refuses on a production machine whatever spelling it
+    /// uses. Reading the exact string only let `NODE_ENV=prod` through, and
+    /// rewriting the key there invalidates every session in circulation.
+    ///
+    /// One test rather than two: `NODE_ENV` is process-global and cargo runs
+    /// tests in parallel, so two of them setting it race each other.
+    #[test]
+    fn production_is_recognised_under_every_spelling() {
+        let restore = std::env::var("NODE_ENV").ok();
+
+        for value in ["production", "prod", "PROD", "Production"] {
+            unsafe { std::env::set_var("NODE_ENV", value) };
+            assert!(super::in_production_env(), "`{}` is production", value);
+        }
+        for value in ["development", "dev", "test", "staging", "stage", ""] {
+            unsafe { std::env::set_var("NODE_ENV", value) };
+            assert!(!super::in_production_env(), "`{}` is not production", value);
+        }
+        unsafe { std::env::remove_var("NODE_ENV") };
+        assert!(!super::in_production_env(), "absent is not production");
+
+        match restore {
+            Some(v) => unsafe { std::env::set_var("NODE_ENV", v) },
+            None => unsafe { std::env::remove_var("NODE_ENV") },
+        }
+    }
+
     use super::*;
 
     fn entry(name: &str, description: &str) -> ListEntry {
