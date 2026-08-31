@@ -247,7 +247,7 @@ enum Commands {
     /// Run environment health checks
     Doctor,
 
-    /// Inspect the registered routes, providers, and decorated services
+    /// Inspect the registered routes, providers, and container bindings
     Inspect,
 
     /// Generate a fresh APP_KEY and write it into .env

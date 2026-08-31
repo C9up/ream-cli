@@ -856,7 +856,7 @@ fn parse_command_list(text: &str) -> Result<Vec<ListEntry>, String> {
         .collect())
 }
 
-/// Inspect: list registered routes, providers, and decorated services.
+/// Inspect: list registered routes, providers, and container bindings.
 /// Boots the app in console mode and dumps an introspection summary to stdout.
 pub fn run_inspect() -> Result<(), String> {
     if !std::path::Path::new("package.json").exists() {
@@ -894,7 +894,17 @@ pub fn run_inspect() -> Result<(), String> {
             console.log('  -', p.constructor?.name ?? '(anonymous)');
         }
 
-        console.log(`\nTotal: ${routes.length} routes, ${providers.length} providers.`);
+        const bindings = app.getApp().container.bindings ?? [];
+        console.log('\nContainer bindings:');
+        if (bindings.length === 0) {
+            console.log('  (none)');
+        } else {
+            for (const b of bindings) {
+                console.log(`  ${b.token}  (${b.scope})`);
+            }
+        }
+
+        console.log(`\nTotal: ${routes.length} routes, ${providers.length} providers, ${bindings.length} bindings.`);
         await app.stop();
         process.exit(0); // one-shot CLI: don't let app-owned handles keep it alive
     "#;
