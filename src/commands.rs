@@ -1082,6 +1082,11 @@ fn test_options(
         // `--input-type=module`, which a worker spawned with a file entry
         // must not receive.
         "nodeArgs": ["--import", "@swc-node/register/esm-register"],
+        // Here the process IS the run, so a summary followed by an unexplained
+        // hang is worse than an exit naming what stayed open. The runner leaves
+        // this off by default, because it is a library and the caller owns the
+        // process.
+        "drainGuard": true,
     })
 }
 
