@@ -1,0 +1,42 @@
+# Every push, not only a release.
+#
+# The fmt/clippy/test gate lived inside the publish workflow, which is
+# maintainer-triggered: a commit was verified when someone published, and not
+# before. A regression could therefore sit on main until release day and then
+# block it.
+name: ream-cli-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: fmt + clippy + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # `node` is not a convenience here: the integration tests spawn it to
+      # exercise the configure probe and the key generator.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test -p ream-cli
+      - run: cargo build --release -p ream-cli
