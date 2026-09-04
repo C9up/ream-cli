@@ -68,19 +68,47 @@ pub fn spawn_node(cmd: &str, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-/// Args for `ream dev` — Node's native `--watch` + `@swc-node/register`.
+/// The project directories `ream dev` watches, when they exist.
+///
+/// Node's `--watch` alone watches only the modules it managed to LOAD. A file
+/// that fails to parse never enters the module graph, so fixing it changes
+/// nothing the watcher is looking at: the server stays down, reporting the
+/// syntax error you already corrected, until the entry point itself is touched.
+/// `--watch-path` watches a directory whatever the graph contains.
+const WATCH_DIRS: &[&str] = &[
+    "app",
+    "bin",
+    "config",
+    "start",
+    "database",
+    "providers",
+    "commands",
+];
+
+/// Args for `ream dev` — Node's native watcher + `@swc-node/register`.
 ///
 /// swc-node reads `.swcrc` (which extends `@c9up/ream/swcrc.app.json`,
 /// `decoratorMetadata: true`) and EMITS `design:paramtypes` — required for IoC
 /// constructor injection. `tsx` / esbuild can NOT emit it, which silently broke
 /// DI in dev (every injected dependency resolved to `undefined`).
-pub fn dev_args() -> [&'static str; 4] {
-    [
-        "--import",
-        "@swc-node/register/esm-register",
-        "--watch",
-        "bin/server.ts",
-    ]
+///
+/// `resources/` is deliberately absent: an asset watcher owns it, and a
+/// stylesheet edit must not restart the server.
+pub fn dev_args() -> Vec<String> {
+    let mut args = vec![
+        "--import".to_string(),
+        "@swc-node/register/esm-register".to_string(),
+        "--watch".to_string(),
+    ];
+    for dir in WATCH_DIRS {
+        // Node refuses a --watch-path that does not exist, so a project without
+        // `database/` must not be handed one.
+        if std::path::Path::new(dir).is_dir() {
+            args.push(format!("--watch-path=./{}", dir));
+        }
+    }
+    args.push("bin/server.ts".to_string());
+    args
 }
 
 /// Read `assets` from the rc file, if the project has one.
@@ -129,12 +157,14 @@ pub fn run_dev() -> Result<(), String> {
     let Some(watcher) = assets.dev_server else {
         // Nothing to run alongside: keep the plain path, where the server owns
         // the terminal and its output is not piped through a prefix.
-        return spawn_node("node", &dev_args());
+        let args = dev_args();
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        return spawn_node("node", &refs);
     };
 
     let server = crate::dev::CommandSpec {
         command: "node".to_string(),
-        args: dev_args().iter().map(|arg| (*arg).to_string()).collect(),
+        args: dev_args(),
     };
 
     crate::dev::run_together(vec![
@@ -1221,8 +1251,44 @@ mod tests {
     }
 
     #[test]
-    fn dev_uses_swc_node_not_tsx() {
+    fn dev_watches_the_source_tree_not_only_the_loaded_graph() {
+        let dir =
+            std::env::temp_dir().join(format!("ream-dev-watch-{}-{}", std::process::id(), line!()));
+        let previous = std::env::current_dir().expect("cwd");
+        std::fs::create_dir_all(dir.join("app")).expect("app");
+        std::fs::create_dir_all(dir.join("config")).expect("config");
+        std::env::set_current_dir(&dir).expect("chdir");
         let args = dev_args();
+        std::env::set_current_dir(previous).expect("restore");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // `--watch` alone watches only what Node LOADED. A file that fails to
+        // parse never enters the module graph, so correcting it leaves the
+        // server down with the error you already fixed.
+        assert!(
+            args.iter().any(|a| a == "--watch-path=./app"),
+            "app/ must be watched by path: {:?}",
+            args
+        );
+        assert!(args.iter().any(|a| a == "--watch-path=./config"));
+        // A directory the project does not have must not be passed: Node
+        // refuses to start on a --watch-path that does not exist.
+        assert!(
+            !args.iter().any(|a| a == "--watch-path=./database"),
+            "a missing directory must not be watched: {:?}",
+            args
+        );
+        // The asset watcher owns `resources/`; a stylesheet edit must not
+        // restart the server.
+        assert!(!args.iter().any(|a| a.contains("resources")));
+        // And the entry point stays last, where node expects the script.
+        assert_eq!(args.last().map(String::as_str), Some("bin/server.ts"));
+    }
+
+    #[test]
+    fn dev_uses_swc_node_not_tsx() {
+        let owned = dev_args();
+        let args: Vec<&str> = owned.iter().map(String::as_str).collect();
         // swc-node emits design:paramtypes (decorator metadata) → IoC DI works.
         assert!(
             args.contains(&"@swc-node/register/esm-register"),
