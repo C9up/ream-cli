@@ -487,7 +487,8 @@ fn main() {
         Commands::StubsPublish { kind, list, force } => {
             if list {
                 println!("Publishable stubs (written to {}/):", stubs::STUBS_DIR);
-                for (name, vars) in stubs::PUBLISHABLE {
+                for name in stubs::PUBLISHABLE {
+                    let vars = generator::stub_variables(name).unwrap_or_default();
                     println!("  {name:<12} {{{{ {} }}}}", vars.join(" }} {{ "));
                 }
                 Ok(())

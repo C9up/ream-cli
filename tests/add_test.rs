@@ -7,56 +7,41 @@
 //!
 //! Test hook contract is documented in `src/add.rs`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_ream"))
 }
 
-/// Path to a workspace `node_modules/` that has `@swc-node/register` (and its
-/// transitive deps) installed. Tests that exercise the configure existence
-/// check spawn `node --import @swc-node/register/esm-register`, which fails
-/// with `ERR_MODULE_NOT_FOUND` on a fresh `/tmp/<fixture>/` cwd. Symlinking
-/// this directory in as the fixture's `node_modules/` lets Node's ESM
-/// resolver find register without polluting the fixture's PM-detection
-/// (lockfiles live in the fixture's root, not in node_modules).
-fn workspace_node_modules() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("apps")
-        .join("syndic")
-        .join("node_modules")
+/// Give the fixture a loadable `@swc-node/register`, built in place.
+///
+/// Every command that reaches the app spawns
+/// `node --import @swc-node/register/esm-register`, so a fixture without it
+/// dies on `ERR_MODULE_NOT_FOUND` before the code under test runs. This used to
+/// be solved by symlinking a workspace `node_modules/` from a sibling
+/// application — a path that does not exist in this repository at all, so the
+/// two tests that needed it returned early and reported success without
+/// asserting anything, in CI every time.
+///
+/// A no-op ESM module is enough: what these tests exercise is how the CLI
+/// classifies the probe's exit, not what the loader compiles.
+fn install_stub_ts_loader(p: &TempProject) {
+    p.write(
+        "node_modules/@swc-node/register/package.json",
+        r#"{
+  "name": "@swc-node/register",
+  "version": "0.0.0-stub",
+  "type": "module",
+  "exports": { "./esm-register": "./esm-register.js" }
 }
-
-/// Symlink `<fixture>/node_modules` to a workspace `node_modules/` that has
-/// `@swc-node/register` resolvable. Unix-only — Windows test runs would need
-/// a different mechanism (junction or copy), out of scope for this story.
-#[cfg(unix)]
-fn link_workspace_node_modules(p: &TempProject) -> bool {
-    use std::os::unix::fs::symlink;
-    let target = workspace_node_modules();
-    // Robust for an isolated checkout / a CI without `apps/syndic` installed:
-    // if the workspace node_modules is absent, the caller SKIPS the swc-dependent
-    // assertions rather than failing on `ERR_MODULE_NOT_FOUND`.
-    if !target.exists() {
-        eprintln!(
-            "skipping swc-register assertions: {} not found (isolated checkout?)",
-            target.display()
-        );
-        return false;
-    }
-    let link = p.path.join("node_modules");
-    if !link.exists() {
-        symlink(&target, &link).expect("symlink workspace node_modules");
-    }
-    true
-}
-
-#[cfg(not(unix))]
-fn link_workspace_node_modules(_p: &TempProject) -> bool {
-    false
+"#,
+    );
+    p.write(
+        "node_modules/@swc-node/register/esm-register.js",
+        "// A loader that registers nothing: the fixture's modules are plain JS.
+",
+    );
 }
 
 struct TempProject {
@@ -393,9 +378,7 @@ fn missing_configure_hook_warns_not_errors_under_add() {
     // path through `ream add` end-to-end.
     let p = ream_project("nohook");
     p.touch("pnpm-lock.yaml");
-    if !link_workspace_node_modules(&p) {
-        return;
-    }
+    install_stub_ts_loader(&p);
     let output = run_add_dry(&p, &["@community/something"]);
     assert!(
         output.status.success(),
@@ -422,9 +405,7 @@ fn configure_subcommand_errors_when_no_hook_export() {
     // export MUST exit 1 (the legacy contract preserved through the
     // configure_with_flags refactor).
     let p = ream_project("configure-nohook");
-    if !link_workspace_node_modules(&p) {
-        return;
-    }
+    install_stub_ts_loader(&p);
     let output = cli()
         .arg("configure")
         .arg("@community/something")
@@ -465,11 +446,4 @@ fn configure_subcommand_accepts_trailing_flags() {
         "expected positional-arg parse error, got: {}",
         stderr
     );
-}
-
-// Helper used from compile-side checks; kept so future tests can share the
-// `Path` constant without duplicating it.
-#[allow(dead_code)]
-fn fixture_path() -> &'static Path {
-    Path::new("tests")
 }

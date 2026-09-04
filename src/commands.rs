@@ -1410,14 +1410,6 @@ mod tests {
         }
     }
 
-    /// The migration script must not double-apply migrations: AtlasProvider
-    /// auto-migrates on boot unless this flag is set before `.start()`.
-    #[test]
-    fn migration_script_skips_the_boot_migration() {
-        let source = include_str!("commands.rs");
-        assert!(source.contains("REAM_SKIP_BOOT_MIGRATE"));
-    }
-
     /// A unique directory under the system temp dir, as `doctor`'s tests use.
     fn loader_fixture(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("ream-loader-{}-{}", std::process::id(), name));

@@ -113,6 +113,13 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo test -p ream-cli
 
+      # `ream new` writes a caret per package, and on 0.x a caret is a ceiling:
+      # a pin left behind scaffolds apps against the line before the one being
+      # maintained. `cargo test` cannot see that — it needs the registry — so
+      # the publish is where it is checked.
+      - name: Scaffold pins still reach what is published
+        run: ./scripts/check-scaffold-pins.sh
+
   build:
     name: Build (${{ matrix.target }})
     needs: [gates]
@@ -167,6 +174,10 @@ jobs:
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       - uses: actions/checkout@v6
+        with:
+          # The release notes are a commit range between two tags; a shallow
+          # clone has neither.
+          fetch-depth: 0
       - uses: actions/download-artifact@v7
         with:
           path: artifacts
@@ -269,12 +280,21 @@ jobs:
         # to find out is to read a diff.
         env:
           GH_TOKEN: ${{ github.token }}
+          # The tag the gates job read off HEAD. `GITHUB_REF_NAME` was the
+          # branch on a workflow_dispatch — the usual way this runs — so the
+          # `refs/tags/main` lookup below failed and the step exited 0 having
+          # created nothing. Every published version arrived with no notes.
+          TAG: ${{ needs.gates.outputs.tag }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          tag="${TAG}"
+          if [ -z "$tag" ]; then
+            echo "::error::TAG output from gates job is empty — cannot create a release"
+            exit 1
+          fi
           if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-            echo "::notice::not built from a tag - no release to create"
-            exit 0
+            echo "::error::${tag} is not in this checkout - refusing to guess the notes range"
+            exit 1
           fi
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "::notice::release $tag already exists - leaving it alone"

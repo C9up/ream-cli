@@ -214,35 +214,52 @@ new Ignitor(APP_ROOT, { importer: IMPORTER })
   })
 "##;
 
+/// What a scaffolded app declares, one caret per package.
+///
+/// On 0.x a caret stays under the next MINOR, so a pin is not a floor that
+/// keeps working — it is a ceiling. `^0.1.27` could not reach @c9up/ream once
+/// it published 0.2.0, and `^0.2.0` could not reach @c9up/atlas once it
+/// published 0.3.0: `ream new` went on scaffolding apps against the line before
+/// the one being maintained, with none of its fixes, and nothing said so. The
+/// comment here already named that failure; the table under it was left to walk
+/// into it.
+///
+/// `scripts/check-scaffold-pins.sh` compares every entry against the registry
+/// and fails the publish, because a list that has to be remembered is a list
+/// that goes stale.
+const BASE_DEPS: &[(&str, &str)] = &[
+    ("@c9up/ream", "^0.2.14"),
+    // bin/server.ts imports it directly; with pnpm's strict node_modules a
+    // transitive copy (via @c9up/atlas) isn't resolvable, so declare it.
+    ("reflect-metadata", "^0.2"),
+];
+
+/// Everything but `slim`, which stays at the framework alone.
+const APP_DEPS: &[(&str, &str)] = &[
+    ("@c9up/atlas", "^0.3.11"),
+    ("@c9up/rune", "^0.1.13"),
+    ("@c9up/warden", "^0.1.25"),
+    ("@c9up/spectrum", "^0.1.12"),
+];
+
+/// The full web stack on top: HTML templating, events, middleware, signing, and
+/// date/recurrence.
+const WEB_DEPS: &[(&str, &str)] = &[
+    ("@c9up/inker", "^0.1.15"),
+    ("@c9up/echo", "^0.1.13"),
+    ("@c9up/blackhole", "^0.1.17"),
+    ("@c9up/sigil", "^0.1.13"),
+    ("@c9up/chronos", "^0.1.12"),
+];
+
 fn package_json(name: &str, template: &str) -> String {
-    // One pin per package: on 0.x a caret stays under the next minor, so a
-    // single shared baseline silently stops resolving the moment one package
-    // moves — `^0.1.4` could never install @c9up/atlas once it reached 0.2.0.
-    // Each entry tracks the minor that package is published on.
-    let mut deps = vec![
-        r#""@c9up/ream": "^0.1.27""#.to_string(),
-        // bin/server.ts imports it directly; with pnpm's strict node_modules a
-        // transitive copy (via @c9up/atlas) isn't resolvable, so declare it.
-        r#""reflect-metadata": "^0.2""#.to_string(),
-    ];
+    let quoted = |(pkg, range): &(&str, &str)| format!(r#""{pkg}": "{range}""#);
+    let mut deps: Vec<String> = BASE_DEPS.iter().map(quoted).collect();
     if template != "slim" {
-        deps.extend([
-            r#""@c9up/atlas": "^0.2.0""#.to_string(),
-            r#""@c9up/rune": "^0.1.7""#.to_string(),
-            r#""@c9up/warden": "^0.1.16""#.to_string(),
-            r#""@c9up/spectrum": "^0.1.9""#.to_string(),
-        ]);
+        deps.extend(APP_DEPS.iter().map(quoted));
     }
     if template == "web" {
-        // Full web stack on top of the api set: HTML templating, events,
-        // middleware, signing, and date/recurrence.
-        deps.extend([
-            r#""@c9up/inker": "^0.1.7""#.to_string(),
-            r#""@c9up/echo": "^0.1.7""#.to_string(),
-            r#""@c9up/blackhole": "^0.1.10""#.to_string(),
-            r#""@c9up/sigil": "^0.1.9""#.to_string(),
-            r#""@c9up/chronos": "^0.1.6""#.to_string(),
-        ]);
+        deps.extend(WEB_DEPS.iter().map(quoted));
     }
 
     let imports = "    \"#app/WILDCARD\": \"./app/WILDCARD\",\n    \"#middleware/WILDCARD\": \"./app/middleware/WILDCARD\",\n    \"#config/WILDCARD\": \"./config/WILDCARD\",\n    \"#providers/WILDCARD\": \"./providers/WILDCARD\",\n    \"#start/WILDCARD\": \"./start/WILDCARD\"".replace("WILDCARD", "*");

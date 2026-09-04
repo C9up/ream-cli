@@ -52,7 +52,7 @@ fn lockfile_for(pm: PackageManager) -> &'static str {
 ///   - any ancestor with `pnpm-workspace.yaml` → treat as pnpm (workspace
 ///     marker hints the PM even before the first install creates a lockfile);
 ///   - any ancestor with `bun.lockb` / `bun.lock` → emit a Bun-specific error
-///     (bun is intentionally deferred — see story 50.1 scope cuts);
+///     (bun support is deliberately not here yet);
 ///   - otherwise the generic "couldn't detect" error.
 ///
 /// Returns the detected PM plus the list of secondary lockfiles in the

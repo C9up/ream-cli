@@ -10,8 +10,8 @@ npm install -g @c9up/ream-cli
 
 ## Commands
 
-Run `ream --help` (or `ream <command> --help`) for the authoritative, always
-up-to-date list. The current surface:
+Run `ream --help` (or `ream <command> --help`) for the authoritative,
+always up-to-date list. What the binary itself defines:
 
 ```bash
 # Scaffolding
@@ -19,42 +19,52 @@ ream new my-app                       # create a new Ream project
 ream template kitchen-sink            # install a project template from its upstream repo
 
 # Development
-ream dev                              # dev server (node --watch + swc-node, DI metadata)
-ream build                            # compile TypeScript to dist/
+ream dev                              # dev server + whatever builds the assets, under one Ctrl-C
+ream build                            # assets, then TypeScript into dist/
 ream start                            # run production (spawns node)
+ream test                             # the suites declared in reamrc.ts
+ream repl                             # a Node REPL with the application booted
 
 # Code generation
-ream make:controller order Order
-ream make:service order Payment
-ream make:entity order OrderItem
+ream make:controller order Order      # app/order/OrderController.ts
+ream make:service order Payment       # app/order/PaymentService.ts
+ream make:entity order OrderItem      # app/order/OrderItem.ts
 ream make:validator order CreateOrder
-ream make:provider Stripe
-ream make:migration create_orders_table
-ream make:seeder OrdersSeeder
 ream make:module order Order          # entity + controller + validator + migration
+ream make:provider Stripe
+ream make:command app:provision       # commands/app-provision.ts, discovered automatically
+ream make:middleware auth --stack router
+ream make:event orderShipped
+ream make:listener sendMail --event orderShipped
 ream stubs:publish controller         # copy a make: template into stubs/make/ to edit it
-
-# Database
-ream migrate                          # run pending migrations
-ream migrate:rollback                 # roll back the last batch
-ream migrate:status                   # show migration status
 
 # Packages
 ream add @c9up/atlas                  # install a package AND run its configure() hook
 ream configure @c9up/photon           # (re-)run a package's configure() hook
 
-# Scheduling
-ream schedule:list                    # list registered scheduled tasks
-ream schedule:run <task>              # run one task now (admin override)
-
 # Integrations / tooling
-ream mcp                              # manage the Ream MCP server registration (.mcp.json)
-ream nova:vapid:generate              # generate Web Push VAPID keys into .env
-ream inspect                          # inspect routes, providers, decorated services
+ream mcp install                      # manage the Ream MCP server registration (.mcp.json)
+ream generate:key                     # a fresh APP_KEY into .env
+ream inspect                          # routes, providers, container bindings
+ream list                             # every command — this binary's and the app's
 
 # Diagnostics
 ream doctor                           # environment health checks
 ream info                             # version info
+```
+
+Every `make:` command takes `--dry-run` (print the plan as JSON, write nothing)
+and `--force` (overwrite what is there).
+
+Anything else is dispatched to the application's console kernel with its flags
+intact, so a package's commands and the app's own run the same way:
+
+```bash
+ream migrate                          # @c9up/ream, across every registered store
+ream migration:run                    # @c9up/atlas
+ream make:migration create_orders_table
+ream schedule:list
+ream provision --email you@example.com   # the app's own
 ```
 
 ## Build from source

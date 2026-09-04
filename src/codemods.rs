@@ -31,7 +31,7 @@ fn parse_probe_timeout(raw: Option<&str>) -> Duration {
 /// Detect the "loader missing" failure mode in the existence-check stderr.
 ///
 /// `configure_with_flags` spawns Node with `--import @swc-node/register/esm-register`
-/// because source-first packages (post-ADR-003) export `.ts` files directly. If
+/// because source-first packages export `.ts` files directly. If
 /// the loader is missing from the user's `node_modules`, Node's own resolver
 /// emits one of these patterns BEFORE the inline probe script runs. Anything
 /// else is a real import error inside the user's package and surfaces verbatim.

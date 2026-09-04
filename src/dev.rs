@@ -114,13 +114,24 @@ pub fn run_together(processes: Vec<Process>) -> Result<(), String> {
     let mut children: Vec<(String, Child)> = Vec::new();
 
     for process in &processes {
-        let mut child = Command::new(&process.spec.command)
+        let spawned = Command::new(&process.spec.command)
             .args(&process.spec.args)
             .env("FORCE_COLOR", "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("failed to start `{}`: {e}", process.spec.command))?;
+            .spawn();
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(e) => {
+                // Whatever already started has to go with it. `Child` has no
+                // `Drop` that kills, so returning here left the server running
+                // and holding its port: `ream dev` reported that the assets
+                // command does not exist, exited, and the next run failed to
+                // bind.
+                stop_all(&mut children);
+                return Err(format!("failed to start `{}`: {e}", process.spec.command));
+            }
+        };
 
         let prefix = format!(
             "{}{:width$}\x1b[0m │ ",
@@ -183,6 +194,18 @@ pub fn run_together(processes: Vec<Process>) -> Result<(), String> {
     } else {
         Err(format!("`{finished}` exited with code {code}"))
     }
+}
+
+/// Stop every child started so far, and wait for it.
+///
+/// Used when a later process cannot start: the ones already running are this
+/// function's to clean up, and nothing else will.
+fn stop_all(children: &mut Vec<(String, Child)>) {
+    for (_, child) in children.iter_mut() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    children.clear();
 }
 
 /// Forward one stream, a line at a time, behind its prefix.
@@ -310,6 +333,52 @@ mod tests {
 
         assert!(error.contains("assets"), "{error}");
         assert!(error.contains("3"), "{error}");
+    }
+
+    /// The reason the two run together, in the failure direction.
+    ///
+    /// A `Child` that is dropped is not killed, so returning on the second
+    /// spawn left the first one running: `ream dev` with a typo in the assets
+    /// command reported the typo, exited, and left a node server holding the
+    /// port — the next run then failed to bind, naming neither cause.
+    #[test]
+    fn kills_what_it_already_started_when_a_later_process_cannot_start() {
+        let marker = std::env::temp_dir().join(format!("ream-orphan-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let script = format!(
+            "sleep 5; printf x > {}",
+            marker.to_str().expect("a utf-8 temp path")
+        );
+
+        let error = run_together(vec![
+            Process {
+                label: "server".to_string(),
+                colour: COLOURS[0],
+                spec: CommandSpec {
+                    command: "sh".to_string(),
+                    args: vec!["-c".to_string(), script],
+                },
+            },
+            Process {
+                label: "assets".to_string(),
+                colour: COLOURS[1],
+                spec: CommandSpec {
+                    command: "ream-no-such-binary".to_string(),
+                    args: Vec::new(),
+                },
+            },
+        ])
+        .unwrap_err();
+        assert!(error.contains("ream-no-such-binary"), "{error}");
+
+        // Long enough for the survivor to have reached its write, had it lived.
+        std::thread::sleep(std::time::Duration::from_millis(6_000));
+        let orphaned = marker.exists();
+        let _ = std::fs::remove_file(&marker);
+        assert!(
+            !orphaned,
+            "the first process outlived the failure and kept running"
+        );
     }
 
     #[test]

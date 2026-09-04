@@ -220,19 +220,22 @@ pub fn resolve(
     })
 }
 
-/// The kinds an app can publish a stub for, with the variables each one
-/// exposes. Printed by `stubs:publish --list` so nobody has to read the source
-/// to find out what `{{ … }}` names are available.
-pub const PUBLISHABLE: &[(&str, &[&str])] = &[
-    ("controller", &["className", "module", "name"]),
-    ("entity", &["className", "module", "name", "tableName"]),
-    ("service", &["className", "module", "name"]),
-    ("validator", &["className", "module", "name"]),
-    ("seeder", &["className", "module", "name"]),
-    ("provider", &["className", "name"]),
-    ("command", &["className", "name"]),
-    ("middleware", &["className", "name", "stack"]),
-    ("event", &["className", "name"]),
+/// The kinds an app can publish a stub for.
+///
+/// The variables each one exposes are NOT listed here: they are read off the
+/// template itself (`generator::stub_variables`), so `stubs:publish --list`
+/// cannot advertise a name the template does not substitute — which a second,
+/// hand-maintained copy did.
+pub const PUBLISHABLE: &[&str] = &[
+    "controller",
+    "entity",
+    "service",
+    "validator",
+    "seeder",
+    "provider",
+    "command",
+    "middleware",
+    "event",
 ];
 
 /// `stubs:publish` — write the built-in template for `kind` into the app's
@@ -245,13 +248,15 @@ pub fn publish(
 ) -> Result<(), String> {
     let kinds: Vec<&str> = match kind {
         Some(k) => {
-            if !PUBLISHABLE.iter().any(|(name, _)| *name == k) {
-                let known: Vec<&str> = PUBLISHABLE.iter().map(|(n, _)| *n).collect();
-                return Err(format!("unknown stub '{k}' (known: {})", known.join(", ")));
+            if !PUBLISHABLE.contains(&k) {
+                return Err(format!(
+                    "unknown stub '{k}' (known: {})",
+                    PUBLISHABLE.join(", ")
+                ));
             }
             vec![k]
         }
-        None => PUBLISHABLE.iter().map(|(n, _)| *n).collect(),
+        None => PUBLISHABLE.to_vec(),
     };
 
     fs::create_dir_all(STUBS_DIR).map_err(|e| format!("cannot create {STUBS_DIR}: {e}"))?;

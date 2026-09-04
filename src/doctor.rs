@@ -118,23 +118,64 @@ fn check_node_version() -> Check {
     }
 }
 
+/// Gate on the exit status, the way the Node check above does.
+///
+/// Reading stdout whatever the status meant a shim that exits non-zero with
+/// nothing on stdout reported `[OK] pnpm:` — a pass, with a blank version where
+/// the number goes. The same gap was closed for Node after an audit; the two
+/// checks sit three lines apart and only one of them was corrected.
 fn check_pnpm() -> Check {
-    match Command::new("pnpm").arg("--version").output() {
-        Ok(output) => {
-            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            Check {
-                name: "pnpm",
-                status: Status::Pass,
-                message: version,
-                fix: None,
+    let output = Command::new("pnpm").arg("--version").output();
+    let reported = output
+        .as_ref()
+        .ok()
+        .map(|out| (out.status.success(), String::from_utf8_lossy(&out.stdout)));
+    pnpm_check(reported.as_ref().map(|(ok, out)| (*ok, out.trim())))
+}
+
+/// What `pnpm --version` reported, read as a check.
+///
+/// `None` is "no such binary"; the flag is the exit status and the string is
+/// what came back on stdout. Split from the spawn so every branch is reachable
+/// from a test — the failing ones are exactly the branches a developer machine
+/// with a working pnpm never takes.
+fn pnpm_check(reported: Option<(bool, &str)>) -> Check {
+    const NAME: &str = "pnpm";
+    const FIX: &str = "Install: npm install -g pnpm";
+    let (succeeded, version) = match reported {
+        None => {
+            return Check {
+                name: NAME,
+                status: Status::Warn,
+                message: "not found".to_string(),
+                fix: Some(FIX.to_string()),
             }
         }
-        Err(_) => Check {
-            name: "pnpm",
+        Some(pair) => pair,
+    };
+    if !succeeded {
+        return Check {
+            name: NAME,
             status: Status::Warn,
-            message: "not found".to_string(),
-            fix: Some("Install: npm install -g pnpm".to_string()),
-        },
+            message: "`pnpm --version` exited non-zero — check your pnpm install or shim"
+                .to_string(),
+            fix: Some(FIX.to_string()),
+        };
+    }
+    if version.is_empty() {
+        return Check {
+            name: NAME,
+            status: Status::Warn,
+            message: "`pnpm --version` printed nothing — check your pnpm install or shim"
+                .to_string(),
+            fix: Some(FIX.to_string()),
+        };
+    }
+    Check {
+        name: NAME,
+        status: Status::Pass,
+        message: version.to_string(),
+        fix: None,
     }
 }
 
@@ -316,10 +357,38 @@ mod tests {
         assert!(!check.message.is_empty());
     }
 
+    /// A broken shim must not read as a healthy pnpm.
+    ///
+    /// Reading stdout without looking at the exit status, `[OK] pnpm:` was
+    /// printed with nothing after the colon — the check said the tool is fine
+    /// and named no version at all.
     #[test]
-    fn test_check_pnpm() {
-        let check = check_pnpm();
-        assert!(!check.message.is_empty());
+    fn a_pnpm_that_fails_is_not_reported_as_present() {
+        let broken = pnpm_check(Some((false, "")));
+        assert!(matches!(broken.status, Status::Warn));
+        assert!(
+            broken.message.contains("exited non-zero"),
+            "{}",
+            broken.message
+        );
+        assert!(broken.fix.is_some());
+
+        let silent = pnpm_check(Some((true, "")));
+        assert!(matches!(silent.status, Status::Warn));
+        assert!(
+            silent.message.contains("printed nothing"),
+            "{}",
+            silent.message
+        );
+
+        let absent = pnpm_check(None);
+        assert!(matches!(absent.status, Status::Warn));
+        assert_eq!(absent.message, "not found");
+
+        let healthy = pnpm_check(Some((true, "10.6.2")));
+        assert!(matches!(healthy.status, Status::Pass));
+        assert_eq!(healthy.message, "10.6.2");
+        assert!(healthy.fix.is_none());
     }
 
     /// A unique directory under the system temp dir. No `tempfile` dependency:
