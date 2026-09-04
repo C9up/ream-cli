@@ -252,6 +252,24 @@ const WEB_DEPS: &[(&str, &str)] = &[
     ("@c9up/chronos", "^0.1.12"),
 ];
 
+/// Development dependencies every template gets.
+///
+/// `tsx` used to be here and is not any more: `ream dev` refuses it on purpose
+/// — esbuild cannot emit `design:paramtypes`, so a project that ran its own
+/// entry through tsx got a container where every injected dependency resolved
+/// to `undefined`. Shipping the tool in the manifest invited exactly that.
+///
+/// The runner is helix, which is what `ream test` drives; `vitest` was here
+/// while the two scripts said different things about what runs the tests.
+const DEV_DEPS: &[(&str, &str)] = &[
+    ("@c9up/helix", "^0.2.8"),
+    ("@swc-node/register", "^1"),
+    ("typescript", "^5.7"),
+];
+
+/// Plus the bridge, for a template whose app the suites boot.
+const APP_DEV_DEPS: &[(&str, &str)] = &[("@c9up/helix-plugin-ream", "^0.1.6")];
+
 fn package_json(name: &str, template: &str) -> String {
     let quoted = |(pkg, range): &(&str, &str)| format!(r#""{pkg}": "{range}""#);
     let mut deps: Vec<String> = BASE_DEPS.iter().map(quoted).collect();
@@ -262,9 +280,31 @@ fn package_json(name: &str, template: &str) -> String {
         deps.extend(WEB_DEPS.iter().map(quoted));
     }
 
+    let mut dev_deps: Vec<String> = DEV_DEPS.iter().map(quoted).collect();
+    if boots_its_app(template) {
+        dev_deps.extend(APP_DEV_DEPS.iter().map(quoted));
+    }
+    dev_deps.sort();
+
+    // `ream test` reads the suites out of the rc file; a template with no rc
+    // file to read them from runs helix directly.
+    let test_script = if boots_its_app(template) {
+        "ream test"
+    } else {
+        "helix test"
+    };
+
     let imports = "    \"#app/WILDCARD\": \"./app/WILDCARD\",\n    \"#middleware/WILDCARD\": \"./app/middleware/WILDCARD\",\n    \"#config/WILDCARD\": \"./config/WILDCARD\",\n    \"#providers/WILDCARD\": \"./providers/WILDCARD\",\n    \"#start/WILDCARD\": \"./start/WILDCARD\"".replace("WILDCARD", "*");
 
-    format!("{{\n  \"name\": \"{}\",\n  \"version\": \"0.1.7\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"imports\": {{\n{}\n  }},\n  \"scripts\": {{\n    \"dev\": \"ream dev\",\n    \"build\": \"ream build\",\n    \"start\": \"ream start\",\n    \"test\": \"vitest run\"\n  }},\n  \"dependencies\": {{\n    {}\n  }},\n  \"devDependencies\": {{\n    \"@swc-node/register\": \"^1\",\n    \"tsx\": \"^4\",\n    \"typescript\": \"^5.7\",\n    \"vitest\": \"^3\"\n  }},\n  \"engines\": {{\n    \"node\": \">=22.0.0\"\n  }}\n}}", name, imports, deps.join(",\n    "))
+    format!("{{\n  \"name\": \"{}\",\n  \"version\": \"0.1.7\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"imports\": {{\n{}\n  }},\n  \"scripts\": {{\n    \"dev\": \"ream dev\",\n    \"build\": \"ream build\",\n    \"start\": \"ream start\",\n    \"test\": \"{}\"\n  }},\n  \"dependencies\": {{\n    {}\n  }},\n  \"devDependencies\": {{\n    {}\n  }},\n  \"engines\": {{\n    \"node\": \">=22.0.0\"\n  }}\n}}", name, imports, test_script, deps.join(",\n    "), dev_deps.join(",\n    "))
+}
+
+/// Does this template start the application from the rc file?
+///
+/// `api` and `web` do. `slim` builds its own Ignitor inline and `microservice`
+/// has none at all, so neither has an rc file a suite could boot from.
+fn boots_its_app(template: &str) -> bool {
+    matches!(template, "api" | "web")
 }
 
 fn tsconfig() -> String {
@@ -328,6 +368,58 @@ fn start_env(database: &str) -> String {
     )
 }
 
+/// The `tests` block `ream test` reads its suites out of.
+///
+/// Two suites, the split AdonisJS scaffolds: `unit` for what needs nothing
+/// started, `functional` for what talks to a booted server. Only `functional`
+/// pays for the server, because only its hook starts one.
+const TESTS_BLOCK: &str = "  tests: {\n    suites: [\n      { name: 'unit', files: ['tests/unit/**/*.test.ts'], timeout: 2000 },\n      { name: 'functional', files: ['tests/functional/**/*.test.ts'], timeout: 30000 },\n    ],\n  },\n";
+
+/// `tests/bootstrap.ts` — how the suites reach the application.
+///
+/// The server is started by the `functional` suite's hook rather than at plugin
+/// time, so a unit test file boots nothing. `start()` hands back its own
+/// teardown, which is why the hook is one line and there is no matching
+/// `teardown` to forget.
+const TEST_BOOTSTRAP: &str = r##"import { configure } from '@c9up/helix'
+import { apiClient } from '@c9up/helix-plugin-ream'
+import { Ignitor } from '@c9up/ream'
+import { createHyperServerFactory } from '@c9up/ream/bootstrap'
+import { createTestUtils } from '@c9up/ream/testing/utils'
+
+const APP_ROOT = new URL('../', import.meta.url)
+
+export const testUtils = createTestUtils(async (port) => {
+  const ignitor = await new Ignitor(APP_ROOT, {
+    port,
+    serverFactory: createHyperServerFactory(),
+  })
+    .useRcFile((await import('../reamrc.js')).default)
+    .httpServer()
+    .start()
+
+  // Port 0 asks the OS for a free one, so the caller has to be told which.
+  return { port: await ignitor.port(), close: () => ignitor.stop() }
+})
+
+await configure({
+  plugins: [apiClient({ testUtils })],
+  configureSuite(suite) {
+    if (suite.name === 'functional') {
+      return suite.setup(() => testUtils.httpServer().start())
+    }
+  },
+})
+"##;
+
+/// A first test, so `ream test` answers on a fresh project.
+const FIRST_TEST: &str = r##"import { test } from '@c9up/helix'
+
+test('the root route answers', async ({ client }) => {
+  await client.get('/').assertOk()
+})
+"##;
+
 fn reamrc(template: &str) -> String {
     // slim AND microservice get an empty reamrc: the microservice template only
     // writes a standalone bin/server.ts (EventBus, no Ignitor/reamrc) and never
@@ -344,15 +436,23 @@ fn reamrc(template: &str) -> String {
     // warden (auth strategies), and blackhole (signed-CSRF + security headers)
     // providers, on top of the api set.
     if template == "web" {
-        return "import { defineConfig } from '@c9up/ream'\n\nexport default defineConfig({\n  providers: [\n    () => import('@c9up/sigil/provider'),\n    () => import('@c9up/warden/provider'),\n    () => import('@c9up/blackhole/provider'),\n    () => import('@c9up/ream/events/provider'),\n    () => import('#providers/AppProvider.js'),\n  ],\n  preloads: [\n    () => import('#start/routes.js'),\n    () => import('#start/kernel.js'),\n  ],\n})\n".to_string();
+        return format!(
+            "import {{ defineConfig }} from '@c9up/ream'\n\nexport default defineConfig({{\n  providers: [\n    () => import('@c9up/sigil/provider'),\n    () => import('@c9up/warden/provider'),\n    () => import('@c9up/blackhole/provider'),\n    () => import('@c9up/ream/events/provider'),\n    () => import('#providers/AppProvider.js'),\n  ],\n  preloads: [\n    () => import('#start/routes.js'),\n    () => import('#start/kernel.js'),\n  ],\n{}}})\n",
+            TESTS_BLOCK
+        );
     }
-    "import { defineConfig } from '@c9up/ream'\n\nexport default defineConfig({\n  providers: [\n    () => import('@c9up/ream/events/provider'),\n    () => import('#providers/AppProvider.js'),\n  ],\n  preloads: [\n    () => import('#start/routes.js'),\n    () => import('#start/kernel.js'),\n  ],\n})\n".to_string()
+    format!(
+        "import {{ defineConfig }} from '@c9up/ream'\n\nexport default defineConfig({{\n  providers: [\n    () => import('@c9up/ream/events/provider'),\n    () => import('#providers/AppProvider.js'),\n  ],\n  preloads: [\n    () => import('#start/routes.js'),\n    () => import('#start/kernel.js'),\n  ],\n{}}})\n",
+        TESTS_BLOCK
+    )
 }
 
 /// Shared skeleton for the api + web templates: server entry, AppProvider, and
 /// a root route. Each template adds its own `start/kernel.ts` on top (write_file
 /// refuses to overwrite, so the kernel must NOT be written here).
 fn write_app_base(root: &Path, name: &str) -> Result<(), String> {
+    write_file(root, "tests/bootstrap.ts", TEST_BOOTSTRAP)?;
+    write_file(root, "tests/functional/root.test.ts", FIRST_TEST)?;
     write_file(
         root,
         "bin/server.ts",
@@ -668,6 +768,59 @@ mod tests {
     /// strictness bumps reach every scaffolded app at once. Asserts the
     /// extends pointer is present and the app-side surface stays minimal
     /// (paths + include only).
+    /// A scaffolded app tests with the runner `ream test` drives, and does not
+    /// ship the loader the CLI refuses.
+    ///
+    /// `tsx` was a devDependency of every generated project while `ream dev`
+    /// went out of its way not to use it — esbuild cannot emit
+    /// `design:paramtypes`, so an entry run through it gets a container where
+    /// every injected dependency is `undefined`. And `scripts.test` said
+    /// `vitest run` while the framework's own command is `ream test`.
+    #[test]
+    fn a_scaffolded_app_tests_with_the_runner_the_framework_drives() {
+        let manifest = package_json("demo", "api");
+        assert!(manifest.contains("\"test\": \"ream test\""), "{manifest}");
+        assert!(manifest.contains("@c9up/helix"), "{manifest}");
+        assert!(manifest.contains("@c9up/helix-plugin-ream"), "{manifest}");
+        assert!(
+            !manifest.contains("tsx"),
+            "tsx is still declared: {manifest}"
+        );
+        assert!(!manifest.contains("vitest"), "{manifest}");
+
+        // No rc file to read suites from, so `ream test` has nothing to read.
+        let slim = package_json("demo", "slim");
+        assert!(slim.contains("\"test\": \"helix test\""), "{slim}");
+        assert!(!slim.contains("@c9up/helix-plugin-ream"), "{slim}");
+    }
+
+    /// The suites are declared where `ream test` looks for them, and the
+    /// bootstrap that boots the app for them is written.
+    #[test]
+    fn the_app_templates_declare_their_suites_and_a_bootstrap() {
+        for template in ["api", "web"] {
+            let rc = reamrc(template);
+            assert!(rc.contains("tests: {"), "{template}: {rc}");
+            assert!(rc.contains("name: 'unit'"), "{template}: {rc}");
+            assert!(rc.contains("name: 'functional'"), "{template}: {rc}");
+        }
+
+        let root = unique_root("suites");
+        write_api_template(&root, "demo").unwrap();
+        let bootstrap = fs::read_to_string(root.join("tests/bootstrap.ts")).unwrap();
+        // Only `functional` pays for a server: a unit test file boots nothing.
+        assert!(bootstrap.contains("configureSuite"), "{bootstrap}");
+        assert!(
+            bootstrap.contains("testUtils.httpServer().start()"),
+            "{bootstrap}"
+        );
+        assert!(
+            root.join("tests/functional/root.test.ts").exists(),
+            "a fresh project must have something for `ream test` to run"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn tsconfig_extends_the_framework_base() {
         let content = tsconfig();

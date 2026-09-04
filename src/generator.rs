@@ -577,7 +577,6 @@ fn vars_of<const N: usize>(pairs: [(&'static str, String); N]) -> BTreeMap<&'sta
 
 const SERVICE: &str = r#"import { Service } from '@c9up/ream'
 
-/** @implements FR<auto-assigned> — TODO describe */
 @Service()
 export class {{ className }} {
   async findAll() {
@@ -621,7 +620,6 @@ fn generate_service(module: &str, name: &str) -> Result<(String, String), String
 
 const ENTITY: &str = r#"import { Entity, Column, PrimaryKey, BaseEntity } from '@c9up/atlas'
 
-/** @implements FR<auto-assigned> — TODO describe */
 @Entity('{{ tableName }}')
 export class {{ className }} extends BaseEntity {
   @PrimaryKey() id!: string
@@ -650,7 +648,6 @@ fn generate_entity(module: &str, name: &str) -> Result<(String, String), String>
 
 const CONTROLLER: &str = r#"import type { HttpContext } from '@c9up/ream'
 
-/** @implements FR<auto-assigned> — TODO describe */
 export class {{ className }} {
   async index({ response }: HttpContext) {
     response.status(200).json([])
@@ -697,7 +694,6 @@ fn generate_controller(module: &str, name: &str) -> Result<(String, String), Str
 
 const VALIDATOR: &str = r#"import { rules, schema } from '@c9up/rune'
 
-/** @implements FR<auto-assigned> — TODO describe */
 export const {{ className }} = schema({
   // Define validation rules
   // name: rules.string().min(1).max(255),
@@ -724,7 +720,6 @@ fn generate_validator(module: &str, name: &str) -> Result<(String, String), Stri
 
 const PROVIDER: &str = r#"import { Provider } from '@c9up/ream'
 
-/** @implements FR<auto-assigned> — TODO describe */
 export default class {{ className }} extends Provider {
   register() {
     // Register bindings in the container
@@ -955,7 +950,6 @@ fn strip_suffix_ci(name: &str, suffix: &str) -> String {
 
 const MIGRATION: &str = r#"import { Migration } from '@c9up/atlas'
 
-/** @implements FR<auto-assigned> — TODO describe */
 export default class {{ className }} extends Migration {
   up() {
     this.schema.createTable('TABLE_NAME', (t) => {
@@ -985,10 +979,7 @@ fn generate_migration(name: &str) -> Result<(String, String), String> {
 
 const SEEDER: &str = r#"import { Seeder } from '@c9up/atlas'
 
-/**
- * Seeds data for the `{{ module }}` module.
- * @implements FR<auto-assigned> — TODO describe
- */
+/** Seeds data for the `{{ module }}` module. */
 export default class {{ className }} extends Seeder {
   async run() {
     // Insert seed data here
@@ -1238,31 +1229,22 @@ mod tests {
         assert!(validate_name_relaxed("ok-name", "name").is_ok());
     }
 
+    /// A generated file carries nothing from this repository's own bookkeeping.
+    ///
+    /// Every template used to open with `@implements FR<auto-assigned> — TODO
+    /// describe`, a traceability marker for a tracking system the application
+    /// being scaffolded does not have and cannot fill in.
     #[test]
-    fn fr_implements_marker_baked_into_every_template() {
-        // The repository's traceability tooling keys off `@implements FR`, so
-        // every generated file carries the marker.
-        let entity = generate_entity("orders", "Order").expect("generator").1;
-        let controller = generate_controller("orders", "Order").expect("generator").1;
-        let validator = generate_validator("orders", "Order").expect("generator").1;
-        let provider = generate_provider("App").expect("generator").1;
-        let migration = generate_migration("CreateOrders").unwrap().1;
-        let seeder = generate_seeder("orders", "User").expect("generator").1;
-        let service = generate_service("orders", "Mailer").expect("generator").1;
-        for body in [
-            &entity,
-            &controller,
-            &validator,
-            &provider,
-            &migration,
-            &seeder,
-            &service,
-        ] {
+    fn a_generated_file_carries_no_marker_from_this_repository() {
+        for kind in crate::stubs::PUBLISHABLE {
+            let stub = built_in_stub(kind).expect("template");
             assert!(
-                body.contains("@implements FR"),
-                "missing FR marker in template: {body}"
+                !stub.contains("@implements"),
+                "{kind} still carries a traceability marker: {stub}"
             );
         }
+        let migration = generate_migration("CreateOrders").expect("generator").1;
+        assert!(!migration.contains("@implements"), "{migration}");
     }
 
     #[test]

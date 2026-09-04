@@ -37,7 +37,15 @@ while IFS= read -r pin; do
   pin_minor=$(printf '%s' "$range" | cut -d. -f2)
   latest_minor=$(printf '%s' "$latest" | cut -d. -f2)
 
-  if [ "$pin_major" != "$latest_major" ]; then
+  # A pin AHEAD of the registry resolves to nothing at all: `pnpm install`
+  # fails outright on a version that was bumped locally and not published yet.
+  # Checking only that the minor lines agree let `^0.2.9` past while the
+  # registry held 0.2.8.
+  highest=$(printf '%s\n%s\n' "$range" "$latest" | sort -V | tail -1)
+  if [ "$highest" = "$range" ] && [ "$range" != "$latest" ]; then
+    echo "::error::$pkg: scaffold pins ^$range, registry is only at $latest — nothing satisfies it"
+    fail=1
+  elif [ "$pin_major" != "$latest_major" ]; then
     echo "::error::$pkg: scaffold pins ^$range, registry is at $latest — a caret cannot cross a major"
     fail=1
   elif [ "$pin_major" = "0" ] && [ "$pin_minor" != "$latest_minor" ]; then
