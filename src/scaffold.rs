@@ -402,7 +402,12 @@ export const testUtils = createTestUtils(async (port) => {
     serverFactory: createHyperServerFactory(),
   })
     .useRcFile((await import('../reamrc.js')).default)
-    .httpServer()
+    // `testMode()`, not `httpServer()`: the suite still gets a server (the
+    // factory above is what asks for one), but the application declares itself
+    // as `test`. That is what a provider entry's `environment: ['web']` reads,
+    // so a scheduler or a worker can be kept out of a test run declaratively
+    // instead of firing in the middle of it.
+    .testMode()
     .start()
 
   // Port 0 asks the OS for a free one, so the caller has to be told which.
@@ -831,6 +836,13 @@ mod tests {
         assert!(
             bootstrap.contains("testUtils.httpServer().start()"),
             "{bootstrap}"
+        );
+        // The suite declares itself as `test`, not as `web` — that is what a
+        // provider entry's `environment: ['web']` reads, and it is the only
+        // declarative way to keep a scheduler out of a test run.
+        assert!(
+            bootstrap.contains(".testMode()") && !bootstrap.contains("\n    .httpServer()"),
+            "the test bootstrap must boot in test mode — got:\n{bootstrap}"
         );
         assert!(
             root.join("tests/functional/root.test.ts").exists(),
