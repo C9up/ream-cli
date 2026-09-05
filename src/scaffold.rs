@@ -228,7 +228,10 @@ new Ignitor(APP_ROOT, { importer: IMPORTER })
 /// and fails the publish, because a list that has to be remembered is a list
 /// that goes stale.
 const BASE_DEPS: &[(&str, &str)] = &[
-    ("@c9up/ream", "^0.2.14"),
+    // 0.2.16 is the floor, not a preference: `config/session.ts` in the web
+    // template imports `@c9up/ream/session/config`, and the container cannot
+    // build the body-parser or session middleware from a lazy import before it.
+    ("@c9up/ream", "^0.2.16"),
     // bin/server.ts imports it directly; with pnpm's strict node_modules a
     // transitive copy (via @c9up/atlas) isn't resolvable, so declare it.
     ("reflect-metadata", "^0.2"),
@@ -263,6 +266,10 @@ const WEB_DEPS: &[(&str, &str)] = &[
 /// while the two scripts said different things about what runs the tests.
 const DEV_DEPS: &[(&str, &str)] = &[
     ("@c9up/helix", "^0.2.8"),
+    // `tsconfig.app.json` declares `types: ["node"]`, so the app has to carry
+    // the package that satisfies it — without this, a fresh project fails
+    // typechecking before it compiles a line of its own code.
+    ("@types/node", "^22"),
     ("@swc-node/register", "^1"),
     ("typescript", "^5.7"),
 ];
@@ -312,7 +319,7 @@ fn tsconfig() -> String {
     // own `include`. Strict / target / decorators / etc. all come from the
     // base so a Ream bump can adjust them across the ecosystem at once.
     let paths = "      \"#app/WILDCARD\": [\"./app/WILDCARD\"],\n      \"#middleware/WILDCARD\": [\"./app/middleware/WILDCARD\"],\n      \"#config/WILDCARD\": [\"./config/WILDCARD\"],\n      \"#providers/WILDCARD\": [\"./providers/WILDCARD\"],\n      \"#start/WILDCARD\": [\"./start/WILDCARD\"]".replace("WILDCARD", "*");
-    format!("{{\n  \"extends\": \"@c9up/ream/tsconfig.app.json\",\n  \"compilerOptions\": {{\n    \"paths\": {{\n{}\n    }}\n  }},\n  \"include\": [\"app\", \"bin\", \"config\", \"providers\", \"start\", \"tests\", \"reamrc.ts\"]\n}}", paths)
+    format!("{{\n  \"extends\": \"@c9up/ream/tsconfig.app.json\",\n  \"compilerOptions\": {{\n    \"rootDir\": \"./\",\n    \"paths\": {{\n{}\n    }}\n  }},\n  \"include\": [\"app\", \"bin\", \"config\", \"providers\", \"start\", \"tests\", \"reamrc.ts\"]\n}}", paths)
 }
 
 /// `.swcrc` for swc-node + unplugin-swc — extends the framework-shipped
@@ -405,8 +412,10 @@ export const testUtils = createTestUtils(async (port) => {
 await configure({
   plugins: [apiClient({ testUtils })],
   configureSuite(suite) {
+    // No `return`: the hook's contract is void, and returning the handle makes
+    // a fresh project fail typechecking.
     if (suite.name === 'functional') {
-      return suite.setup(() => testUtils.httpServer().start())
+      suite.setup(() => testUtils.httpServer().start())
     }
   },
 })
@@ -456,7 +465,7 @@ fn write_app_base(root: &Path, name: &str) -> Result<(), String> {
     write_file(
         root,
         "bin/server.ts",
-        "import 'reflect-metadata'\nimport { Ignitor, prettyPrintError } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\nconst APP_ROOT = new URL('../', import.meta.url)\n\nnew Ignitor(APP_ROOT, {\n  port: Number(process.env.PORT ?? 3000),\n  serverFactory: createHyperServerFactory(),\n})\n  .tap((app) => {\n    // Validates the environment against start/env.ts before anything boots,\n    // so a missing APP_KEY stops the app here rather than on the first\n    // response that tries to sign a cookie.\n    app.booting(async () => {\n      await import('#start/env.js')\n    })\n  })\n  .useRcFile((await import('../reamrc.js')).default)\n  .httpServer()\n  .start()\n  .then((app) => {\n    const port = Number(process.env.PORT ?? 3000)\n    console.log(`\\n  ➜ Ream ready on http://${app.host()}:${port}\\n`)\n  })\n  .catch((err) => {\n    prettyPrintError(err)\n    process.exit(1)\n  })\n",
+        "import 'reflect-metadata'\nimport { Ignitor, prettyPrintError } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\nconst APP_ROOT = new URL('../', import.meta.url)\n\n// PORT is deliberately NOT read here. `#start/env` is what loads `.env`, and\n// it runs in `booting()` below, so a port read now would only ever see the\n// shell's environment. The Ignitor reads it when it binds.\nnew Ignitor(APP_ROOT, {\n  serverFactory: createHyperServerFactory(),\n})\n  .tap((app) => {\n    // Validates the environment against start/env.ts before anything boots,\n    // so a missing APP_KEY stops the app here rather than on the first\n    // response that tries to sign a cookie.\n    app.booting(async () => {\n      await import('#start/env.js')\n    })\n  })\n  .useRcFile((await import('../reamrc.js')).default)\n  .httpServer()\n  .start()\n  .then(async (app) => {\n    // Ask the server what it BOUND rather than recomputing it: in development an\n    // occupied port is stepped past, and a banner that guesses sends you to an\n    // address nothing is listening on.\n    console.log(`\\n  ➜ Ream ready on http://${app.host()}:${await app.port()}\\n`)\n  })\n  .catch((err) => {\n    prettyPrintError(err)\n    process.exit(1)\n  })\n",
     )?;
     write_file(root, "providers/AppProvider.ts", "import { Provider } from '@c9up/ream'\n\nexport default class AppProvider extends Provider {\n  register() {}\n  async boot() {}\n  async start() {}\n  async ready() {}\n  async shutdown() {}\n}\n")?;
     write_file(root, "start/routes.ts", &format!("import router from '@c9up/ream/services/router'\n\nrouter.get('/', async ({{ response }}) => {{\n  response.status(200).json({{ name: '{}', status: 'running' }})\n}})\n", name))?;
@@ -476,34 +485,43 @@ fn write_api_template(root: &Path, name: &str) -> Result<(), String> {
 fn write_web_template(root: &Path, name: &str) -> Result<(), String> {
     write_app_base(root, name)?;
 
-    // Kernel: blackhole (signed CSRF + headers) → body parser → cookie session
-    // → auth middleware. Session runs BEFORE auth so `ctx.session` is populated
-    // when `@Guard('session')` resolves the user.
+    // Kernel: body parser → cookie session → blackhole (signed CSRF + headers)
+    // → auth middleware. The order is load-bearing twice over. CSRF runs AFTER
+    // the body parser because the token of a form post arrives IN the body, and
+    // session runs BEFORE auth so `ctx.session` is populated when
+    // `@Guard('session')` resolves the user.
+    //
+    // Each entry is a lazy import of a middleware CLASS, which is all
+    // `router.use()` takes: the container builds it, and its settings come from
+    // its `config/*.ts` file.
     write_file(
         root,
         "start/kernel.ts",
-        r#"import env from '#start/env'
-import { blackholeMiddleware } from '@c9up/blackhole/middleware'
-import { BodyParserMiddleware, SessionMiddleware } from '@c9up/ream'
-import router from '@c9up/ream/services/router'
-
-const bodyParser = new BodyParserMiddleware()
-
-// Cookie session — the data lives in the encrypted cookie, signed with APP_KEY.
-const session = new SessionMiddleware({
-  driver: 'cookie',
-  // Through the validated environment: start/env.ts is what guarantees the
-  // key exists, and reading `process.env` around it returns `undefined` typed
-  // as a string.
-  secret: env.get('APP_KEY'),
-})
+        r#"import router from '@c9up/ream/services/router'
 
 router.use([
-  blackholeMiddleware,
-  (ctx, next) => bodyParser.handle(ctx, next),
-  (ctx, next) => session.handle(ctx, next),
+  () => import('@c9up/ream/bodyparser_middleware'),
+  () => import('@c9up/ream/session_middleware'),
+  () => import('@c9up/blackhole/middleware'),
   () => import('#middleware/auth_middleware.js'),
 ])
+"#,
+    )?;
+
+    // Cookie session — the data lives in the cookie itself, signed with APP_KEY.
+    write_file(
+        root,
+        "config/session.ts",
+        r#"import env from '#start/env.js'
+import { defineConfig } from '@c9up/ream/session/config'
+
+export default defineConfig({
+  store: 'cookie',
+  // Through the validated environment, never `process.env` directly: the
+  // schema in start/env.ts is what guarantees the key is there at all, and
+  // reading around it gives back `string | undefined` typed as a string.
+  secret: env.get('APP_KEY'),
+})
 "#,
     )?;
 
@@ -532,7 +550,7 @@ export default {
     write_file(
         root,
         "config/blackhole.ts",
-        r#"import env from '#start/env'
+        r#"import env from '#start/env.js'
 import { defineConfig } from '@c9up/blackhole/config'
 
 export default defineConfig({
@@ -576,7 +594,7 @@ export default class AuthMiddleware {
         const result = await strategy.verifyWithContext('', { session: ctx.session })
         if (result.authenticated && result.user) {
           ctx.auth = {
-            authenticated: true,
+            isAuthenticated: true,
             user: result.user,
             roles: result.user.roles ?? [],
             permissions: result.user.permissions ?? [],
@@ -597,7 +615,7 @@ fn write_slim_template(root: &Path, _name: &str) -> Result<(), String> {
     write_file(
         root,
         "bin/server.ts",
-        "import { Ignitor } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\nconst app = new Ignitor({\n  port: Number(process.env.PORT ?? 3000),\n  serverFactory: createHyperServerFactory(),\n})\n  .tap((app) => {\n    // Validates the environment against start/env.ts before anything boots,\n    // so a missing APP_KEY stops the app here rather than on the first\n    // response that tries to sign a cookie.\n    app.booting(async () => {\n      await import('#start/env.js')\n    })\n  })\n  .httpServer()\n  .routes((router) => {\n    router.get('/', async ({ response }) => {\n      response.status(200).send('Hello from Ream!')\n    })\n  })\n\nawait app.start()\nconsole.log(`\\n  ➜ Ream ready on http://${app.host()}:${process.env.PORT ?? 3000}\\n`)\n",
+        "import { Ignitor } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\n// The Ignitor reads PORT when it binds, which is after `booting()` has loaded\n// `.env`; reading it here would see only the shell's environment.\nconst app = new Ignitor({\n  serverFactory: createHyperServerFactory(),\n})\n  .tap((app) => {\n    // Validates the environment against start/env.ts before anything boots,\n    // so a missing APP_KEY stops the app here rather than on the first\n    // response that tries to sign a cookie.\n    app.booting(async () => {\n      await import('#start/env.js')\n    })\n  })\n  .httpServer()\n  .routes((router) => {\n    router.get('/', async ({ response }) => {\n      response.status(200).send('Hello from Ream!')\n    })\n  })\n\nawait app.start()\nconsole.log(`\\n  ➜ Ream ready on http://${app.host()}:${await app.port()}\\n`)\n",
     )?;
     Ok(())
 }
@@ -870,6 +888,36 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// The port comes from the environment, and the environment is not loaded
+    /// until `booting()` runs. A scaffold that reads PORT at construction bound
+    /// 3000 while announcing whatever `.env` said — the banner lied because the
+    /// two readers ran either side of the `.env` load.
+    #[test]
+    fn server_entry_never_reads_the_port_before_boot() {
+        for (template, name) in [
+            ("api", "port-api"),
+            ("web", "port-web"),
+            ("slim", "port-slim"),
+        ] {
+            let root = unique_root(name);
+            match template {
+                "api" => write_api_template(&root, "demo").unwrap(),
+                "web" => write_web_template(&root, "demo").unwrap(),
+                _ => write_slim_template(&root, "demo").unwrap(),
+            }
+            let bin = fs::read_to_string(root.join("bin/server.ts")).unwrap();
+            assert!(
+                !bin.contains("process.env.PORT"),
+                "{template}: bin/server.ts must leave PORT to the Ignitor — got:\n{bin}"
+            );
+            assert!(
+                bin.contains("await app.port()"),
+                "{template}: the banner must report the port that was BOUND — got:\n{bin}"
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
     /// `start/env.ts` requires APP_KEY, and there is no second hand-maintained
     /// type declaration to drift from it — the types come from `Env.create`.
     #[test]
@@ -924,20 +972,44 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// The web template must pre-wire the session/cookie auth kit: a kernel that
-    /// registers blackhole + a cookie SessionMiddleware before the auth
+    /// The web template must pre-wire the session/cookie auth kit: a kernel
+    /// registering the body parser, the session and blackhole ahead of the auth
     /// middleware, a session-first `config/auth.ts`, signed-CSRF
-    /// `config/blackhole.ts`, and the session auth middleware.
+    /// `config/blackhole.ts`, a cookie `config/session.ts`, and the session auth
+    /// middleware.
     #[test]
     fn web_template_prewires_session_auth() {
         let root = unique_root("web-template");
         write_web_template(&root, "demo").unwrap();
 
         let kernel = fs::read_to_string(root.join("start/kernel.ts")).unwrap();
+        for entry in [
+            "@c9up/ream/bodyparser_middleware",
+            "@c9up/ream/session_middleware",
+            "@c9up/blackhole/middleware",
+            "#middleware/auth_middleware.js",
+        ] {
+            assert!(
+                kernel.contains(&format!("() => import('{entry}')")),
+                "web kernel must register {entry} as a lazy class import — got:\n{kernel}"
+            );
+        }
+        // CSRF reads the token out of a form post, so it cannot run before the
+        // body has been parsed.
         assert!(
-            kernel.contains("SessionMiddleware") && kernel.contains("blackholeMiddleware"),
-            "web kernel must wire SessionMiddleware + blackhole — got:\n{}",
-            kernel
+            kernel.find("bodyparser_middleware") < kernel.find("blackhole/middleware"),
+            "the body parser must run before CSRF — got:\n{kernel}"
+        );
+        // And the session has to exist before the guard reads a user from it.
+        assert!(
+            kernel.find("session_middleware") < kernel.find("auth_middleware"),
+            "the session must run before the auth middleware — got:\n{kernel}"
+        );
+
+        let session = fs::read_to_string(root.join("config/session.ts")).unwrap();
+        assert!(
+            session.contains("store: 'cookie'") && session.contains("env.get('APP_KEY')"),
+            "config/session.ts must sign the cookie store with APP_KEY — got:\n{session}"
         );
 
         let auth = fs::read_to_string(root.join("config/auth.ts")).unwrap();
