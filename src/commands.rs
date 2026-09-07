@@ -49,6 +49,35 @@ fn inherited_status(cmd: &str, args: &[&str]) -> Result<ExitStatus, String> {
 }
 
 /// Spawn a Node.js command, forwarding stdio.
+/// What a signal-terminated child means for the command that supervised it.
+///
+/// Ctrl-C is how a dev server is meant to be stopped, so INT and TERM are not
+/// failures; anything else is the process dying, and saying which signal is the
+/// difference between "it stopped" and "the OOM killer took it".
+#[cfg(unix)]
+fn signal_outcome(status: &std::process::ExitStatus) -> Result<(), String> {
+    use std::os::unix::process::ExitStatusExt;
+    match status.signal() {
+        // SIGINT / SIGTERM: asked to stop, and it did.
+        Some(2) | Some(15) | None => Ok(()),
+        Some(9) => Err(
+            "'node' was killed (SIGKILL) — usually the OOM killer, or an external `kill -9`"
+                .to_string(),
+        ),
+        Some(11) => Err(
+            "'node' crashed (SIGSEGV) — a native addon fault, not a JavaScript error".to_string(),
+        ),
+        Some(other) => Err(format!("'node' was terminated by signal {other}")),
+    }
+}
+
+/// Windows has no signals: a process without an exit code has nothing to
+/// report beyond the fact.
+#[cfg(not(unix))]
+fn signal_outcome(_status: &std::process::ExitStatus) -> Result<(), String> {
+    Err("'node' ended without an exit code".to_string())
+}
+
 pub fn spawn_node(cmd: &str, args: &[&str]) -> Result<(), String> {
     // Check we're in a Ream project
     if !std::path::Path::new("package.json").exists() {
@@ -199,8 +228,13 @@ pub fn run_dev() -> Result<(), String> {
             let status = inherited_status("node", &refs)?;
             match status.code() {
                 Some(crate::dev::EXIT_RESTART) => continue,
-                Some(0) | None => return Ok(()),
+                Some(0) => return Ok(()),
                 Some(code) => return Err(format!("'node' exited with code {code}")),
+                // No code means a SIGNAL, not a clean exit — `None` used to be
+                // folded in with success, so a segfault in a native addon or a
+                // kill by the OOM killer ended `ream dev` with status 0 and not
+                // a word about why the server was gone.
+                None => return signal_outcome(&status),
             }
         }
     };
@@ -1335,6 +1369,28 @@ mod tests {
     /// HMR mode is not "watch plus a flag": Node's `--watch` restarts on any
     /// change, so leaving it in means the restart always beats the hot swap and
     /// nothing is ever hot-reloaded.
+    /// A signal is not a clean exit.
+    ///
+    /// `status.code()` answers `None` when a child was killed rather than
+    /// returning — SIGKILL from the OOM killer, SIGSEGV from a native addon.
+    /// Folded in with `Some(0)`, `ream dev` ended with status 0 and said
+    /// nothing about why the server had gone.
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_is_reported_unless_it_is_the_one_the_user_sent() {
+        use std::os::unix::process::ExitStatusExt;
+        let killed = std::process::ExitStatus::from_raw(9);
+        let segfault = std::process::ExitStatus::from_raw(11);
+        let interrupted = std::process::ExitStatus::from_raw(2);
+        let terminated = std::process::ExitStatus::from_raw(15);
+
+        assert!(signal_outcome(&killed).unwrap_err().contains("OOM"));
+        assert!(signal_outcome(&segfault).unwrap_err().contains("SIGSEGV"));
+        // Ctrl-C is how a dev server is meant to be stopped.
+        assert!(signal_outcome(&interrupted).is_ok());
+        assert!(signal_outcome(&terminated).is_ok());
+    }
+
     #[test]
     fn hmr_mode_drops_node_watch_and_loads_the_hot_entry() {
         let args = dev_args_for(true);
