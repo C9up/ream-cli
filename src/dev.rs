@@ -17,7 +17,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -93,7 +93,22 @@ pub struct Process {
     pub label: String,
     pub colour: &'static str,
     pub spec: CommandSpec,
+    /// Whether this process asking to be restarted is honoured.
+    ///
+    /// Only the dev server sets it, and only in HMR mode: `@c9up/ream/hot`
+    /// exits on [`EXIT_RESTART`] when hot-hook reports a change it cannot
+    /// swap in place. Upstream hears the same event over Node's IPC channel,
+    /// which a Rust parent does not have.
+    pub restartable: bool,
 }
+
+/// The exit code the dev server uses to ask for a restart.
+///
+/// Matches `FULL_RELOAD_EXIT_CODE` in `@c9up/ream/hot`. 75 is EX_TEMPFAIL:
+/// "try again", which is exactly the message, and it is far from the codes a
+/// crashing Node process produces (1, or 128+signal) so a real failure is
+/// never mistaken for a restart request.
+pub const EXIT_RESTART: i32 = 75;
 
 /// ANSI colours for the prefixes, in the order processes are given.
 pub const COLOURS: [&str; 4] = ["\x1b[34m", "\x1b[35m", "\x1b[36m", "\x1b[33m"];
@@ -110,42 +125,25 @@ pub fn run_together(processes: Vec<Process>) -> Result<(), String> {
     }
 
     let width = processes.iter().map(|p| p.label.len()).max().unwrap_or(0);
-    let (tx, rx) = mpsc::channel::<(String, i32)>();
+    let prefixes: Vec<String> = processes
+        .iter()
+        .map(|p| format!("{}{:width$}\x1b[0m │ ", p.colour, p.label, width = width))
+        .collect();
     let mut children: Vec<(String, Child)> = Vec::new();
 
-    for process in &processes {
-        let spawned = Command::new(&process.spec.command)
-            .args(&process.spec.args)
-            .env("FORCE_COLOR", "1")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
-        let mut child = match spawned {
-            Ok(child) => child,
-            Err(e) => {
+    for (index, process) in processes.iter().enumerate() {
+        match spawn_piped(&process.spec, &prefixes[index]) {
+            Ok(child) => children.push((process.label.clone(), child)),
+            Err(message) => {
                 // Whatever already started has to go with it. `Child` has no
                 // `Drop` that kills, so returning here left the server running
                 // and holding its port: `ream dev` reported that the assets
                 // command does not exist, exited, and the next run failed to
                 // bind.
                 stop_all(&mut children);
-                return Err(format!("failed to start `{}`: {e}", process.spec.command));
+                return Err(message);
             }
-        };
-
-        let prefix = format!(
-            "{}{:width$}\x1b[0m │ ",
-            process.colour,
-            process.label,
-            width = width
-        );
-        if let Some(stdout) = child.stdout.take() {
-            pump(stdout, prefix.clone(), false);
         }
-        if let Some(stderr) = child.stderr.take() {
-            pump(stderr, prefix, true);
-        }
-        children.push((process.label.clone(), child));
     }
 
     // Each child is watched through a shared handle rather than moved into its
@@ -157,25 +155,37 @@ pub fn run_together(processes: Vec<Process>) -> Result<(), String> {
         .map(|(label, child)| (label, Arc::new(Mutex::new(child))))
         .collect();
 
-    for (label, child) in &shared {
-        let (label, child, tx) = (label.clone(), Arc::clone(child), tx.clone());
-        thread::spawn(move || loop {
+    // One polling loop over every child rather than a thread each: a restart
+    // has to put a NEW child into the same slot, and a thread that has already
+    // reported its child's exit cannot do that.
+    let outcome: (String, i32, Option<String>) = 'supervise: loop {
+        for (index, (label, child)) in shared.iter().enumerate() {
             let finished = child
                 .lock()
                 .ok()
                 .and_then(|mut c| c.try_wait().ok().flatten());
-            if let Some(status) = finished {
-                let _ = tx.send((label, status.code().unwrap_or(1)));
-                return;
-            }
-            thread::sleep(POLL_INTERVAL);
-        });
-    }
-    drop(tx);
+            let Some(status) = finished else { continue };
+            let code = status.code().unwrap_or(1);
 
-    let (finished, code) = rx
-        .recv()
-        .map_err(|_| "no process reported an exit".to_string())?;
+            // A restart request is not an exit to report — it is the next boot.
+            if processes[index].restartable && code == EXIT_RESTART {
+                match spawn_piped(&processes[index].spec, &prefixes[index]) {
+                    Ok(replacement) => {
+                        if let Ok(mut slot) = child.lock() {
+                            *slot = replacement;
+                        }
+                        continue;
+                    }
+                    // Could not start it again: THAT is an exit, and saying why
+                    // beats looping on a spawn that will not work.
+                    Err(message) => break 'supervise (label.clone(), 1, Some(message)),
+                }
+            }
+            break 'supervise (label.clone(), code, None);
+        }
+        thread::sleep(POLL_INTERVAL);
+    };
+    let (finished, code, spawn_error) = outcome;
 
     // Stop the rest — the whole point of running them together. A watcher left
     // behind keeps writing to the output file after the server is gone.
@@ -189,11 +199,36 @@ pub fn run_together(processes: Vec<Process>) -> Result<(), String> {
         }
     }
 
+    if let Some(message) = spawn_error {
+        return Err(message);
+    }
     if code == 0 {
         Ok(())
     } else {
         Err(format!("`{finished}` exited with code {code}"))
     }
+}
+
+/// Start one process with its output piped through the label prefix.
+///
+/// Split out because a restart has to do exactly what the first start did,
+/// pumps included: a replacement whose streams are not pumped is a server whose
+/// output silently stops after the first hot reload.
+fn spawn_piped(spec: &CommandSpec, prefix: &str) -> Result<Child, String> {
+    let mut child = Command::new(&spec.command)
+        .args(&spec.args)
+        .env("FORCE_COLOR", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to start `{}`: {e}", spec.command))?;
+    if let Some(stdout) = child.stdout.take() {
+        pump(stdout, prefix.to_string(), false);
+    }
+    if let Some(stderr) = child.stderr.take() {
+        pump(stderr, prefix.to_string(), true);
+    }
+    Ok(child)
 }
 
 /// Stop every child started so far, and wait for it.
@@ -292,6 +327,59 @@ mod tests {
 
     /// The reason these processes run together: when one ends, the other must
     /// not survive it. With `&` in a script, the watcher outlives the server.
+    /// The exit code that means "start me again".
+    ///
+    /// Upstream hears this over Node's IPC channel; a Rust parent has none, so
+    /// the request arrives as an exit code and the supervisor has to tell it
+    /// apart from a process that genuinely stopped. Without this it reads as
+    /// the dev server quitting on the first change it cannot hot-swap.
+    #[test]
+    fn a_restartable_process_asking_for_a_restart_is_started_again() {
+        let counter =
+            std::env::temp_dir().join(format!("ream-restart-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_file(&counter);
+        let path = counter.display().to_string();
+
+        // Exits 75 (restart) the first two times, then 0. A supervisor that
+        // does not restart sees only the first exit and stops there.
+        let script = format!(
+            "n=$(cat {path} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {path}; \
+             if [ $n -lt 3 ]; then exit {EXIT_RESTART}; fi; exit 0"
+        );
+        let result = run_together(vec![Process {
+            label: "server".to_string(),
+            colour: COLOURS[0],
+            restartable: true,
+            spec: CommandSpec {
+                command: "sh".to_string(),
+                args: vec!["-c".to_string(), script],
+            },
+        }]);
+
+        let runs = std::fs::read_to_string(&counter).unwrap_or_default();
+        let _ = std::fs::remove_file(&counter);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(runs.trim(), "3", "it should have been started three times");
+    }
+
+    /// And only when it opted in: a watcher that exits 75 has genuinely
+    /// stopped, and restarting it forever would hide that.
+    #[test]
+    fn a_process_that_did_not_opt_in_is_not_restarted() {
+        let result = run_together(vec![Process {
+            label: "assets".to_string(),
+            colour: COLOURS[0],
+            restartable: false,
+            spec: CommandSpec {
+                command: "sh".to_string(),
+                args: vec!["-c".to_string(), format!("exit {EXIT_RESTART}")],
+            },
+        }]);
+
+        let message = result.expect_err("it must report the exit");
+        assert!(message.contains(&EXIT_RESTART.to_string()), "{message}");
+    }
+
     #[test]
     fn stops_the_survivor_when_one_process_exits() {
         let start = std::time::Instant::now();
@@ -299,6 +387,7 @@ mod tests {
             Process {
                 label: "short".to_string(),
                 colour: COLOURS[0],
+                restartable: false,
                 spec: CommandSpec {
                     command: "sh".to_string(),
                     args: vec!["-c".to_string(), "exit 0".to_string()],
@@ -307,6 +396,7 @@ mod tests {
             Process {
                 label: "long".to_string(),
                 colour: COLOURS[1],
+                restartable: false,
                 spec: CommandSpec {
                     command: "sh".to_string(),
                     args: vec!["-c".to_string(), "sleep 30".to_string()],
@@ -324,6 +414,7 @@ mod tests {
         let error = run_together(vec![Process {
             label: "assets".to_string(),
             colour: COLOURS[0],
+            restartable: false,
             spec: CommandSpec {
                 command: "sh".to_string(),
                 args: vec!["-c".to_string(), "exit 3".to_string()],
@@ -354,6 +445,7 @@ mod tests {
             Process {
                 label: "server".to_string(),
                 colour: COLOURS[0],
+                restartable: false,
                 spec: CommandSpec {
                     command: "sh".to_string(),
                     args: vec!["-c".to_string(), script],
@@ -362,6 +454,7 @@ mod tests {
             Process {
                 label: "assets".to_string(),
                 colour: COLOURS[1],
+                restartable: false,
                 spec: CommandSpec {
                     command: "ream-no-such-binary".to_string(),
                     args: Vec::new(),
@@ -386,6 +479,7 @@ mod tests {
         let error = run_together(vec![Process {
             label: "assets".to_string(),
             colour: COLOURS[0],
+            restartable: false,
             spec: CommandSpec {
                 command: "ream-no-such-binary".to_string(),
                 args: Vec::new(),

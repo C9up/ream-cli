@@ -94,17 +94,46 @@ const WATCH_DIRS: &[&str] = &[
 ///
 /// `resources/` is deliberately absent: an asset watcher owns it, and a
 /// stylesheet edit must not restart the server.
-pub fn dev_args() -> Vec<String> {
+/// Whether the project can hot-reload — i.e. whether it has `hot-hook`.
+///
+/// Upstream's dev server picks between an `hmr` mode and a `watch` mode the
+/// same way, and for the same reason: hot reloading needs a dependency the
+/// application declares, and a project that has not added it must keep working
+/// exactly as before rather than fail.
+pub fn hot_hook_is_installed() -> bool {
+    std::path::Path::new("node_modules/hot-hook").is_dir()
+}
+
+/// Args for `ream dev`, in either mode.
+///
+/// **HMR** (`hot-hook` present): `@c9up/ream/hot` registers a loader that
+/// tracks the import graph and swaps a changed module inside the running
+/// process. Node's own `--watch` is deliberately ABSENT here — it restarts on
+/// any change, which is exactly what hot reloading exists to avoid, and having
+/// both means the restart always wins.
+///
+/// **Watch** (no `hot-hook`): the previous behaviour, unchanged.
+///
+/// `resources/` is deliberately absent from the watched directories in both:
+/// an asset watcher owns it, and a stylesheet edit must not restart the server.
+pub fn dev_args_for(hmr: bool) -> Vec<String> {
     let mut args = vec![
         "--import".to_string(),
         "@swc-node/register/esm-register".to_string(),
-        "--watch".to_string(),
     ];
-    for dir in WATCH_DIRS {
-        // Node refuses a --watch-path that does not exist, so a project without
-        // `database/` must not be handed one.
-        if std::path::Path::new(dir).is_dir() {
-            args.push(format!("--watch-path=./{}", dir));
+    if hmr {
+        // After the TypeScript loader, never before: this file is TypeScript
+        // itself and nothing can load it until swc-node is registered.
+        args.push("--import".to_string());
+        args.push("@c9up/ream/hot".to_string());
+    } else {
+        args.push("--watch".to_string());
+        for dir in WATCH_DIRS {
+            // Node refuses a --watch-path that does not exist, so a project
+            // without `database/` must not be handed one.
+            if std::path::Path::new(dir).is_dir() {
+                args.push(format!("--watch-path=./{}", dir));
+            }
         }
     }
     args.push("bin/server.ts".to_string());
@@ -153,18 +182,32 @@ pub fn run_dev() -> Result<(), String> {
     }
     require_ts_loader()?;
 
+    let hmr = hot_hook_is_installed();
     let assets = read_assets_config()?;
     let Some(watcher) = assets.dev_server else {
         // Nothing to run alongside: keep the plain path, where the server owns
         // the terminal and its output is not piped through a prefix.
-        let args = dev_args();
+        let args = dev_args_for(hmr);
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        return spawn_node("node", &refs);
+        if !hmr {
+            return spawn_node("node", &refs);
+        }
+        // In HMR mode the server asks for its own restart by exiting on a
+        // known code — see `EXIT_RESTART`. Without this loop that request is
+        // just the dev server quitting, which is worse than no HMR at all.
+        loop {
+            let status = inherited_status("node", &refs)?;
+            match status.code() {
+                Some(crate::dev::EXIT_RESTART) => continue,
+                Some(0) | None => return Ok(()),
+                Some(code) => return Err(format!("'node' exited with code {code}")),
+            }
+        }
     };
 
     let server = crate::dev::CommandSpec {
         command: "node".to_string(),
-        args: dev_args(),
+        args: dev_args_for(hmr),
     };
 
     crate::dev::run_together(vec![
@@ -172,11 +215,15 @@ pub fn run_dev() -> Result<(), String> {
             label: "server".to_string(),
             colour: crate::dev::COLOURS[0],
             spec: server,
+            // Only the server restarts itself; an asset watcher that exits has
+            // genuinely stopped.
+            restartable: hmr,
         },
         crate::dev::Process {
             label: "assets".to_string(),
             colour: crate::dev::COLOURS[1],
             spec: watcher,
+            restartable: false,
         },
     ])
 }
@@ -1258,7 +1305,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("app")).expect("app");
         std::fs::create_dir_all(dir.join("config")).expect("config");
         std::env::set_current_dir(&dir).expect("chdir");
-        let args = dev_args();
+        let args = dev_args_for(false);
         std::env::set_current_dir(previous).expect("restore");
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -1285,9 +1332,49 @@ mod tests {
         assert_eq!(args.last().map(String::as_str), Some("bin/server.ts"));
     }
 
+    /// HMR mode is not "watch plus a flag": Node's `--watch` restarts on any
+    /// change, so leaving it in means the restart always beats the hot swap and
+    /// nothing is ever hot-reloaded.
+    #[test]
+    fn hmr_mode_drops_node_watch_and_loads_the_hot_entry() {
+        let args = dev_args_for(true);
+
+        assert!(
+            !args
+                .iter()
+                .any(|a| a == "--watch" || a.starts_with("--watch-path")),
+            "node's own watcher must be off in HMR mode: {:?}",
+            args
+        );
+        assert!(args.iter().any(|a| a == "@c9up/ream/hot"), "{:?}", args);
+        // Order is load-bearing: `@c9up/ream/hot` is TypeScript, so nothing can
+        // load it until swc-node is registered.
+        let swc = args
+            .iter()
+            .position(|a| a == "@swc-node/register/esm-register")
+            .expect("swc-node");
+        let hot = args
+            .iter()
+            .position(|a| a == "@c9up/ream/hot")
+            .expect("hot");
+        assert!(swc < hot, "swc-node must come first: {:?}", args);
+        assert_eq!(args.last().map(String::as_str), Some("bin/server.ts"));
+    }
+
+    /// A project that never added `hot-hook` must behave exactly as before —
+    /// the mode is chosen by what is installed, the way upstream chooses
+    /// between its `hmr` and `watch` modes.
+    #[test]
+    fn watch_mode_is_unchanged_and_carries_no_hot_entry() {
+        let args = dev_args_for(false);
+
+        assert!(args.iter().any(|a| a == "--watch"), "{:?}", args);
+        assert!(!args.iter().any(|a| a == "@c9up/ream/hot"), "{:?}", args);
+    }
+
     #[test]
     fn dev_uses_swc_node_not_tsx() {
-        let owned = dev_args();
+        let owned = dev_args_for(false);
         let args: Vec<&str> = owned.iter().map(String::as_str).collect();
         // swc-node emits design:paramtypes (decorator metadata) → IoC DI works.
         assert!(
