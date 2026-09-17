@@ -132,6 +132,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary: ream
             npm-pkg: ream-cli-linux-x64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: ream
+            npm-pkg: ream-cli-linux-arm64
           - os: macos-latest
             target: x86_64-apple-darwin
             binary: ream
@@ -197,7 +201,7 @@ jobs:
             exit 1
           fi
           VERSION=${TAG#v}
-          for platform in linux-x64 darwin-x64 darwin-arm64 win32-x64; do
+          for platform in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64; do
             PKG="ream-cli-${platform}"
             mkdir -p "npm/${PKG}"
 
@@ -244,6 +248,7 @@ jobs:
             "bin": { "ream": "bin/ream" },
             "optionalDependencies": {
               "@c9up/ream-cli-linux-x64": "${VERSION}",
+              "@c9up/ream-cli-linux-arm64": "${VERSION}",
               "@c9up/ream-cli-darwin-x64": "${VERSION}",
               "@c9up/ream-cli-darwin-arm64": "${VERSION}",
               "@c9up/ream-cli-win32-x64": "${VERSION}"
@@ -259,6 +264,7 @@ jobs:
           const os = require('os');
           const platformMap = {
             'linux-x64': '@c9up/ream-cli-linux-x64',
+            'linux-arm64': '@c9up/ream-cli-linux-arm64',
             'darwin-x64': '@c9up/ream-cli-darwin-x64',
             'darwin-arm64': '@c9up/ream-cli-darwin-arm64',
             'win32-x64': '@c9up/ream-cli-win32-x64',
