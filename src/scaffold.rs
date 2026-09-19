@@ -240,8 +240,8 @@ const BASE_DEPS: &[(&str, &str)] = &[
 /// Everything but `slim`, which stays at the framework alone.
 const APP_DEPS: &[(&str, &str)] = &[
     ("@c9up/atlas", "^0.3.11"),
-    ("@c9up/rune", "^0.1.13"),
-    ("@c9up/warden", "^0.1.25"),
+    ("@c9up/rune", "^0.2.0"),
+    ("@c9up/warden", "^0.2.0"),
     ("@c9up/spectrum", "^0.1.12"),
 ];
 
@@ -249,7 +249,7 @@ const APP_DEPS: &[(&str, &str)] = &[
 /// date/recurrence.
 const WEB_DEPS: &[(&str, &str)] = &[
     ("@c9up/inker", "^0.1.15"),
-    ("@c9up/echo", "^0.1.13"),
+    ("@c9up/echo", "^0.2.0"),
     ("@c9up/blackhole", "^0.1.17"),
     ("@c9up/sigil", "^0.1.13"),
     ("@c9up/chronos", "^0.1.12"),
