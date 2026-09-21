@@ -98,7 +98,7 @@ enum Commands {
         flags: Vec<String>,
     },
 
-    /// Start development server (node --watch + swc-node; emits decorator metadata for DI)
+    /// Start development server — hot-reloads through hot-hook when the project has it, otherwise node --watch
     Dev,
 
     /// Start production server (spawns node)
