@@ -120,6 +120,24 @@ enum Commands {
         /// Stop at the first failure
         #[arg(long)]
         bail: bool,
+        /// Collect V8 coverage for the run
+        #[arg(long)]
+        coverage: bool,
+        /// Comma-separated coverage reporters, e.g. text-summary,lcov
+        #[arg(long = "coverage-reporters")]
+        coverage_reporters: Option<String>,
+        /// Directory the coverage reports are written to
+        #[arg(long = "coverage-dir")]
+        coverage_dir: Option<String>,
+        /// Inline JSON thresholds, e.g. {"lines":80,"functions":75}
+        #[arg(long = "coverage-thresholds")]
+        coverage_thresholds: Option<String>,
+        /// Comma-separated globs to measure, overriding the app layout
+        #[arg(long = "coverage-include")]
+        coverage_include: Option<String>,
+        /// Comma-separated globs to leave out of the measurement
+        #[arg(long = "coverage-exclude")]
+        coverage_exclude: Option<String>,
     },
 
     /// Generate a service class
@@ -490,7 +508,26 @@ fn main() {
             threads,
             reporters,
             bail,
-        } => commands::run_tests(&suites, threads, reporters.as_deref(), bail),
+            coverage,
+            coverage_reporters,
+            coverage_dir,
+            coverage_thresholds,
+            coverage_include,
+            coverage_exclude,
+        } => commands::run_tests(
+            &suites,
+            threads,
+            reporters.as_deref(),
+            bail,
+            commands::CoverageFlags {
+                enabled: coverage,
+                reporters: coverage_reporters.as_deref(),
+                dir: coverage_dir.as_deref(),
+                thresholds: coverage_thresholds.as_deref(),
+                include: coverage_include.as_deref(),
+                exclude: coverage_exclude.as_deref(),
+            },
+        ),
         Commands::MakeService { module, name, flags } => {
             generator::make("service", &module, &name, flags.dry_run, flags.force)
         }

@@ -1094,11 +1094,41 @@ pub fn info() -> Result<(), String> {
 /// The AdonisJS stratification: the framework reads its rc file and hands the
 /// suites to the runner. All of that lives in TypeScript (`@c9up/helix-plugin-ream/runner`),
 /// so this stays a thin spawn — the same split as `run_migration`.
+/// The coverage half of `ream test`, spelled the way helix spells it.
+///
+/// Coverage belongs to the runner, not to ream: the CLI only names the flags
+/// and hands the values across, the same way it hands `--threads` across.
+pub struct CoverageFlags<'a> {
+    pub enabled: bool,
+    pub reporters: Option<&'a str>,
+    pub dir: Option<&'a str>,
+    pub thresholds: Option<&'a str>,
+    pub include: Option<&'a str>,
+    pub exclude: Option<&'a str>,
+}
+
+/// What `--coverage` measures when the run names nothing.
+///
+/// The runner's own default is `src/**`, which a package has and an application
+/// does not — an app's code sits in `app/`, `start/`, `config/`. Left alone,
+/// every `ream test --coverage` in an application would print a report over
+/// zero files. `src/**` stays in the list so a package driven by `ream test`
+/// keeps working.
+const APP_COVERAGE_INCLUDE: &[&str] = &[
+    "app/**/*.{ts,tsx}",
+    "start/**/*.{ts,tsx}",
+    "config/**/*.{ts,tsx}",
+    "commands/**/*.{ts,tsx}",
+    "database/**/*.{ts,tsx}",
+    "src/**/*.{ts,tsx,js,mjs,cjs}",
+];
+
 pub fn run_tests(
     suites: &[String],
     threads: Option<usize>,
     reporters: Option<&str>,
     bail: bool,
+    coverage: CoverageFlags<'_>,
 ) -> Result<(), String> {
     if !std::path::Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
@@ -1110,7 +1140,7 @@ pub fn run_tests(
         );
     }
 
-    let options = test_options(suites, threads, reporters, bail);
+    let options = test_options(suites, threads, reporters, bail, &coverage)?;
 
     let script = format!(
         r#"
@@ -1178,8 +1208,9 @@ fn test_options(
     threads: Option<usize>,
     reporters: Option<&str>,
     bail: bool,
-) -> serde_json::Value {
-    serde_json::json!({
+    coverage: &CoverageFlags<'_>,
+) -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({
         "suites": suites,
         "threads": threads,
         "reporters": reporters.map(|r| {
@@ -1198,11 +1229,177 @@ fn test_options(
         // this off by default, because it is a library and the caller owns the
         // process.
         "drainGuard": true,
-    })
+        "coverage": coverage_options(coverage)?,
+    }))
+}
+
+/// A comma-separated flag value, trimmed, with the empty entries dropped.
+fn split_list(value: &str) -> Vec<&str> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
+/// The globs of a `--coverage-include` / `--coverage-exclude` value.
+fn globs(value: &str) -> Result<Vec<&str>, String> {
+    let patterns = split_list(value);
+    if patterns.is_empty() {
+        return Err("a coverage glob flag was given no pattern".to_string());
+    }
+    Ok(patterns)
+}
+
+/// Translate the coverage flags into helix's `CoverageOptions`, or `null` when
+/// the run collects nothing.
+///
+/// The keys the user did not name are LEFT OUT rather than sent as `null`: the
+/// runner reads `reporters`/`outputDir` as "unset means the default", and an
+/// explicit `null` would have to be defended against on the other side.
+fn coverage_options(flags: &CoverageFlags<'_>) -> Result<serde_json::Value, String> {
+    // Naming a coverage detail without asking for coverage is a typo worth
+    // saying out loud — silently collecting nothing is the failure mode that
+    // wastes an afternoon.
+    let detailed = flags.reporters.is_some()
+        || flags.dir.is_some()
+        || flags.thresholds.is_some()
+        || flags.include.is_some()
+        || flags.exclude.is_some();
+    if !flags.enabled {
+        if detailed {
+            return Err(
+                "--coverage-* was given without --coverage, so nothing would be collected"
+                    .to_string(),
+            );
+        }
+        return Ok(serde_json::Value::Null);
+    }
+
+    let mut options = serde_json::Map::new();
+    options.insert("enabled".to_string(), serde_json::Value::Bool(true));
+    if let Some(reporters) = flags.reporters {
+        let names = split_list(reporters);
+        if names.is_empty() {
+            return Err("--coverage-reporters names no reporter".to_string());
+        }
+        options.insert("reporters".to_string(), serde_json::json!(names));
+    }
+    match flags.include {
+        Some(include) => options.insert("include".to_string(), serde_json::json!(globs(include)?)),
+        None => options.insert(
+            "include".to_string(),
+            serde_json::json!(APP_COVERAGE_INCLUDE),
+        ),
+    };
+    if let Some(exclude) = flags.exclude {
+        options.insert("exclude".to_string(), serde_json::json!(globs(exclude)?));
+    }
+    if let Some(dir) = flags.dir {
+        options.insert("outputDir".to_string(), serde_json::json!(dir));
+    }
+    if let Some(thresholds) = flags.thresholds {
+        // Parsed HERE so a malformed value is named before a full test run is
+        // spent on it, and so it reaches the script as JSON rather than as text
+        // spliced into a program.
+        let parsed: serde_json::Value = serde_json::from_str(thresholds)
+            .map_err(|err| format!("--coverage-thresholds is not valid JSON: {err}"))?;
+        if !parsed.is_object() {
+            return Err(
+                "--coverage-thresholds expects a JSON object, e.g. {\"lines\":80}".to_string(),
+            );
+        }
+        options.insert("thresholds".to_string(), parsed);
+    }
+    Ok(serde_json::Value::Object(options))
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{coverage_options, CoverageFlags};
+
+    fn flags<'a>() -> CoverageFlags<'a> {
+        CoverageFlags {
+            enabled: false,
+            reporters: None,
+            dir: None,
+            thresholds: None,
+            include: None,
+            exclude: None,
+        }
+    }
+
+    /// Without `--coverage` the runner is handed nothing at all — not an
+    /// object with `enabled: false`, which it would still have to reason about.
+    #[test]
+    fn coverage_is_absent_until_asked_for() {
+        assert!(coverage_options(&flags()).unwrap().is_null());
+    }
+
+    /// The application layout, not the runner's `src/**`: an app keeps its code
+    /// in `app/`, and a report over zero files reads as "nothing to cover".
+    #[test]
+    fn enabling_coverage_measures_the_app_layout() {
+        let options = coverage_options(&CoverageFlags {
+            enabled: true,
+            ..flags()
+        })
+        .unwrap();
+        let include = options["include"].as_array().expect("include");
+        assert!(include.iter().any(|glob| glob == "app/**/*.{ts,tsx}"));
+        assert!(include.iter().any(|glob| glob == "start/**/*.{ts,tsx}"));
+        assert!(options.get("exclude").is_none());
+    }
+
+    /// A named `--coverage-include` replaces the layout rather than adding to
+    /// it, so a run can be narrowed to one directory.
+    #[test]
+    fn an_explicit_include_replaces_the_layout() {
+        let options = coverage_options(&CoverageFlags {
+            enabled: true,
+            include: Some("app/models/**/*.ts, app/services/**/*.ts"),
+            ..flags()
+        })
+        .unwrap();
+        assert_eq!(
+            options["include"],
+            serde_json::json!(["app/models/**/*.ts", "app/services/**/*.ts"])
+        );
+    }
+
+    /// Detailing a collection that was never enabled collects nothing at all,
+    /// which is worth a word rather than a green run with an empty report.
+    #[test]
+    fn detailing_coverage_without_enabling_it_is_refused() {
+        let err = coverage_options(&CoverageFlags {
+            reporters: Some("lcov"),
+            ..flags()
+        })
+        .unwrap_err();
+        assert!(err.contains("--coverage"), "{err}");
+    }
+
+    /// Thresholds reach the runner as JSON, so a malformed value is named here
+    /// rather than after a full run.
+    #[test]
+    fn thresholds_are_parsed_before_the_run() {
+        let options = coverage_options(&CoverageFlags {
+            enabled: true,
+            thresholds: Some(r#"{"lines":80}"#),
+            ..flags()
+        })
+        .unwrap();
+        assert_eq!(options["thresholds"]["lines"], 80);
+
+        let err = coverage_options(&CoverageFlags {
+            enabled: true,
+            thresholds: Some("80"),
+            ..flags()
+        })
+        .unwrap_err();
+        assert!(err.contains("JSON object"), "{err}");
+    }
+
     /// `generate:key` refuses on a production machine whatever spelling it
     /// uses. Reading the exact string only let `NODE_ENV=prod` through, and
     /// rewriting the key there invalidates every session in circulation.
@@ -1458,7 +1655,8 @@ mod tests {
         // literal. What could terminate that literal is a double quote or a
         // newline; interpolated raw, this name would close it and run code.
         let hostile = "a\", process.exit(42); //\nb".to_string();
-        let options = test_options(std::slice::from_ref(&hostile), None, None, false);
+        let options =
+            test_options(std::slice::from_ref(&hostile), None, None, false, &flags()).unwrap();
 
         let rendered = options.to_string();
         // Round-trips as data...
@@ -1479,21 +1677,21 @@ mod tests {
 
     #[test]
     fn reporters_are_split_and_emptied_entries_dropped() {
-        let options = test_options(&[], None, Some("spec, json ,,"), false);
+        let options = test_options(&[], None, Some("spec, json ,,"), false, &flags()).unwrap();
         assert_eq!(options["reporters"], serde_json::json!(["spec", "json"]));
     }
 
     #[test]
     fn absent_options_stay_null_so_the_script_deletes_them() {
         // `runTests` fills its own defaults; a `null` would override them.
-        let options = test_options(&[], None, None, false);
+        let options = test_options(&[], None, None, false, &flags()).unwrap();
         assert!(options["threads"].is_null());
         assert!(options["reporters"].is_null());
     }
 
     #[test]
     fn workers_are_spawned_with_the_swc_loader_not_input_type() {
-        let options = test_options(&[], None, None, false);
+        let options = test_options(&[], None, None, false, &flags()).unwrap();
         let args = options["nodeArgs"].as_array().expect("nodeArgs is a list");
         assert_eq!(
             args,
