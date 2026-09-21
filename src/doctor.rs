@@ -26,6 +26,7 @@ pub fn run() -> Result<(), String> {
         check_reamrc(),
         check_package_json(),
         check_tsconfig(),
+        check_hot_reload(),
         check_ts_loader(),
     ];
 
@@ -248,6 +249,56 @@ fn check_package_json() -> Check {
             message: "unreadable".to_string(),
             fix: None,
         },
+    }
+}
+
+/// Does `ream dev` hot-reload, or restart the whole process on every save?
+///
+/// `dev` picks the mode by looking for `hot-hook`, the way upstream's assembler
+/// does. A project created before that existed simply has neither the
+/// dependency nor the `hotHook` block, restarts on every change, and is told
+/// nothing — the cost is invisible because a restart LOOKS like it is working.
+fn check_hot_reload() -> Check {
+    let installed = Path::new("node_modules/hot-hook").is_dir();
+    let declared = std::fs::read_to_string("package.json")
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    let has_boundaries = declared
+        .as_ref()
+        .and_then(|v| v.get("hotHook"))
+        .and_then(|v| v.get("boundaries"))
+        .is_some();
+
+    if installed && has_boundaries {
+        return Check {
+            name: "hot-hook",
+            status: Status::Pass,
+            message: "ream dev hot-reloads instead of restarting".to_string(),
+            fix: None,
+        };
+    }
+    if installed && !has_boundaries {
+        return Check {
+            name: "hot-hook",
+            status: Status::Warn,
+            // Without boundaries hot-hook has nothing to invalidate, so `dev`
+            // drops --watch for a loader that reloads nothing at all: worse
+            // than the restart it replaced.
+            message: "installed, but package.json has no hotHook.boundaries".to_string(),
+            fix: Some(
+                r#"Add to package.json: "hotHook": { "boundaries": ["./app/controllers/**/*.ts", "./app/middleware/*.ts"] } — ENTRY points only, never a glob that also catches components"#
+                    .to_string(),
+            ),
+        };
+    }
+    Check {
+        name: "hot-hook",
+        status: Status::Warn,
+        message: "absent — ream dev restarts the whole process on every change".to_string(),
+        fix: Some(
+            r#"pnpm add -D hot-hook, then add "hotHook": { "boundaries": ["./app/controllers/**/*.ts", "./app/middleware/*.ts"] } to package.json"#
+                .to_string(),
+        ),
     }
 }
 
