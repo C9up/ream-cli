@@ -390,7 +390,47 @@ fn native_command_name(command: &Commands) -> Option<&'static str> {
     }
 }
 
+/// Is this a bare `--help` / `-h` / `help`, with no command after it?
+///
+/// clap answers `--help` from its own definition, which knows only the commands
+/// written in this binary. Every command an application puts in `commands/`,
+/// and every one a package registers, is therefore invisible there while
+/// `ream list` shows them all — the same question answered two ways.
+///
+/// Console does not split them: its `help` flag is documented as "Display help
+/// for the given command. WHEN NO COMMAND IS GIVEN DISPLAY HELP FOR THE LIST
+/// COMMAND". So a bare help is the list, and `--help` after a command keeps
+/// clap's per-command page, which is what "for the given command" means.
+fn is_bare_help(args: &[String]) -> bool {
+    let mut saw_help = false;
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" | "help" => saw_help = true,
+            // A global switch may sit beside it; anything else is the command
+            // whose own help was asked for.
+            "--no-ansi" | "--ansi" => {}
+            _ => return false,
+        }
+    }
+    saw_help
+}
+
 fn main() {
+    // Before `Cli::parse()`, which would answer `--help` itself and exit.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if is_bare_help(&argv) {
+        if argv.iter().any(|a| a == "--no-ansi") {
+            unsafe { std::env::set_var("NO_COLOR", "1") };
+        }
+        // `run_list` prints its own usage line; clap's would be a second one
+        // saying the same thing in a different shape.
+        if let Err(err) = commands::run_list(&framework_commands(), false, &[]) {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let cli = Cli::parse();
 
     // The console's global colour switches. Exported so the Node side (which renders
@@ -534,5 +574,43 @@ fn main() {
             eprintln!("error: {}", e);
         }
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::is_bare_help;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn a_bare_help_is_the_list() {
+        // Console documents its help flag as "when no command is given display
+        // help for the list command", and the list is the only place an app's
+        // own commands appear.
+        assert!(is_bare_help(&args(&["--help"])));
+        assert!(is_bare_help(&args(&["-h"])));
+        assert!(is_bare_help(&args(&["help"])));
+        // A global switch may sit beside it.
+        assert!(is_bare_help(&args(&["--no-ansi", "--help"])));
+    }
+
+    #[test]
+    fn help_for_a_given_command_stays_claps_page() {
+        // "for the given command" is the other half of the same sentence: the
+        // per-command page is complete and belongs to clap.
+        assert!(!is_bare_help(&args(&["make:controller", "--help"])));
+        assert!(!is_bare_help(&args(&["help", "make:controller"])));
+        assert!(!is_bare_help(&args(&["--help", "dev"])));
+    }
+
+    #[test]
+    fn no_arguments_at_all_is_not_help() {
+        // A bare `ream` is already `ream list`; routing it through the help
+        // path would print the same thing by a second route.
+        assert!(!is_bare_help(&args(&[])));
+        assert!(!is_bare_help(&args(&["list"])));
     }
 }
