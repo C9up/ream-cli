@@ -258,6 +258,39 @@ fn check_package_json() -> Check {
 /// does. A project created before that existed simply has neither the
 /// dependency nor the `hotHook` block, restarts on every change, and is told
 /// nothing — the cost is invisible because a restart LOOKS like it is working.
+/// The boundaries glob that matches THIS project's layout.
+///
+/// Suggesting the wrong one is worse than suggesting nothing: boundaries that
+/// match no file leave hot-hook with nothing to invalidate, and `dev` has by
+/// then dropped `--watch` for a loader that reloads nothing at all. A flat
+/// `app/controllers` and a modular `app/modules/*/controllers` are both
+/// conventional here, so the answer is read from disk rather than assumed.
+fn boundaries_suggestion() -> String {
+    let mut globs: Vec<&str> = Vec::new();
+    if Path::new("app/controllers").is_dir() {
+        globs.push("./app/controllers/**/*.ts");
+    }
+    if Path::new("app/middleware").is_dir() {
+        globs.push("./app/middleware/*.ts");
+    }
+    if Path::new("app/modules").is_dir() {
+        // One directory per bounded context; the glob covers every module
+        // without naming them, so a new module needs no edit here.
+        globs.push("./app/modules/*/controllers/*.ts");
+        globs.push("./app/modules/*/middleware/*.ts");
+    }
+    if globs.is_empty() {
+        return r#""hotHook": { "boundaries": [ ... ] } - the ENTRY points your routes import lazily"#
+            .to_string();
+    }
+    let list = globs
+        .iter()
+        .map(|g| format!("\"{g}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(r#""hotHook": {{ "boundaries": [{list}] }}"#)
+}
+
 fn check_hot_reload() -> Check {
     let installed = Path::new("node_modules/hot-hook").is_dir();
     let declared = std::fs::read_to_string("package.json")
@@ -285,20 +318,20 @@ fn check_hot_reload() -> Check {
             // drops --watch for a loader that reloads nothing at all: worse
             // than the restart it replaced.
             message: "installed, but package.json has no hotHook.boundaries".to_string(),
-            fix: Some(
-                r#"Add to package.json: "hotHook": { "boundaries": ["./app/controllers/**/*.ts", "./app/middleware/*.ts"] } — ENTRY points only, never a glob that also catches components"#
-                    .to_string(),
-            ),
+            fix: Some(format!(
+                "Add to package.json: {} - ENTRY points only, never a glob that also catches services or entities",
+                boundaries_suggestion()
+            )),
         };
     }
     Check {
         name: "hot-hook",
         status: Status::Warn,
         message: "absent — ream dev restarts the whole process on every change".to_string(),
-        fix: Some(
-            r#"pnpm add -D hot-hook, then add "hotHook": { "boundaries": ["./app/controllers/**/*.ts", "./app/middleware/*.ts"] } to package.json"#
-                .to_string(),
-        ),
+        fix: Some(format!(
+            "pnpm add -D hot-hook, then add {} to package.json - and import controllers lazily, [() => import(...), 'method'], or hot-hook forces a full reload anyway",
+            boundaries_suggestion()
+        )),
     }
 }
 
