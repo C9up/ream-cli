@@ -46,7 +46,7 @@ jobs:
       # exercise the configure probe and the key generator.
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: '24'
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test -p ream-cli
@@ -67,7 +67,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Tag-vs-Cargo.toml gate
@@ -226,7 +226,7 @@ jobs:
           path: artifacts
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: '24'
           registry-url: https://registry.npmjs.org
 
       # Create platform-specific packages
