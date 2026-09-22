@@ -80,26 +80,26 @@ fn check_node_version() -> Check {
                 .next()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-            if major >= 22 {
+            if major >= 24 {
                 Check {
                     name: "Node.js",
                     status: Status::Pass,
-                    message: format!("{} (>= 22 required)", version),
+                    message: format!("{} (>= 24 required)", version),
                     fix: None,
                 }
             } else if major >= 20 {
                 Check {
                     name: "Node.js",
                     status: Status::Warn,
-                    message: format!("{} — Node.js 22+ recommended", version),
-                    fix: Some("Install Node.js 22 LTS".to_string()),
+                    message: format!("{} — Node.js 24+ recommended", version),
+                    fix: Some("Install Node.js 24 LTS".to_string()),
                 }
             } else {
                 Check {
                     name: "Node.js",
                     status: Status::Fail,
-                    message: format!("{} — Node.js 22+ required", version),
-                    fix: Some("Install Node.js 22 LTS: https://nodejs.org/".to_string()),
+                    message: format!("{} — Node.js 24+ required", version),
+                    fix: Some("Install Node.js 24 LTS: https://nodejs.org/".to_string()),
                 }
             }
         }
@@ -108,13 +108,13 @@ fn check_node_version() -> Check {
             status: Status::Fail,
             message: "`node --version` exited non-zero — check your Node install or shim"
                 .to_string(),
-            fix: Some("Install Node.js 22 LTS: https://nodejs.org/".to_string()),
+            fix: Some("Install Node.js 24 LTS: https://nodejs.org/".to_string()),
         },
         Err(_) => Check {
             name: "Node.js",
             status: Status::Fail,
             message: "not found".to_string(),
-            fix: Some("Install Node.js 22 LTS: https://nodejs.org/".to_string()),
+            fix: Some("Install Node.js 24 LTS: https://nodejs.org/".to_string()),
         },
     }
 }
@@ -292,46 +292,40 @@ fn boundaries_suggestion() -> String {
 }
 
 fn check_hot_reload() -> Check {
-    let installed = Path::new("node_modules/hot-hook").is_dir();
     let declared = std::fs::read_to_string("package.json")
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-    let has_boundaries = declared
+    let boundaries = declared
         .as_ref()
         .and_then(|v| v.get("hotHook"))
         .and_then(|v| v.get("boundaries"))
-        .is_some();
+        .and_then(|v| v.as_array());
 
-    if installed && has_boundaries {
-        return Check {
-            name: "hot-hook",
+    match boundaries {
+        Some(list) if !list.is_empty() => Check {
+            name: "hot reload",
             status: Status::Pass,
-            message: "ream dev hot-reloads instead of restarting".to_string(),
+            message: format!(
+                "{} boundar{} declared — ream dev swaps a module instead of restarting",
+                list.len(),
+                if list.len() == 1 { "y" } else { "ies" }
+            ),
             fix: None,
-        };
-    }
-    if installed && !has_boundaries {
-        return Check {
-            name: "hot-hook",
+        },
+        // The loader is always loaded now, so the question is no longer
+        // whether hot reloading is available but whether anything is allowed to
+        // be swapped. With no boundary every change walks up to a module
+        // nobody re-imports and becomes a full reload — a working server that
+        // restarts on every save, which is what this used to be silent about.
+        _ => Check {
+            name: "hot reload",
             status: Status::Warn,
-            // Without boundaries hot-hook has nothing to invalidate, so `dev`
-            // drops --watch for a loader that reloads nothing at all: worse
-            // than the restart it replaced.
-            message: "installed, but package.json has no hotHook.boundaries".to_string(),
+            message: "no hotHook.boundaries — every change restarts the server".to_string(),
             fix: Some(format!(
-                "Add to package.json: {} - ENTRY points only, never a glob that also catches services or entities",
+                "Add to package.json: {} - ENTRY points only, never a glob that also catches services or entities, and import controllers lazily, [() => import(...), 'method'], or the swap cannot reach them",
                 boundaries_suggestion()
             )),
-        };
-    }
-    Check {
-        name: "hot-hook",
-        status: Status::Warn,
-        message: "absent — ream dev restarts the whole process on every change".to_string(),
-        fix: Some(format!(
-            "pnpm add -D hot-hook, then add {} to package.json - and import controllers lazily, [() => import(...), 'method'], or hot-hook forces a full reload anyway",
-            boundaries_suggestion()
-        )),
+        },
     }
 }
 

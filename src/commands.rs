@@ -78,6 +78,31 @@ fn signal_outcome(_status: &std::process::ExitStatus) -> Result<(), String> {
     Err("'node' ended without an exit code".to_string())
 }
 
+/// Run the built application, with V8's compile cache turned on.
+///
+/// `NODE_COMPILE_CACHE` makes V8 keep the bytecode it compiled the JavaScript
+/// into, and reuse it on the next boot instead of parsing and compiling the
+/// same files again. Set here rather than inside the framework because the
+/// variable is read at process start: a call from library code would only ever
+/// cover the modules imported after it, and miss everything that got the app
+/// that far.
+///
+/// NAMED DEVIATION — AdonisJS does not do this; neither `@adonisjs/core` nor
+/// `@adonisjs/assembler` mentions the compile cache. It is a plain win with no
+/// semantic effect, and it belongs to `start` rather than to `dev` because a
+/// development server is restarted by a file change, not by a deploy.
+///
+/// An existing value is left alone: an operator who pointed the cache somewhere
+/// else, or emptied the variable to turn it off, meant it.
+pub fn run_start() -> Result<(), String> {
+    if std::env::var_os("NODE_COMPILE_CACHE").is_none() {
+        // Under `node_modules` with the other build artefacts, so deleting that
+        // directory clears the cache too and nothing has to know it exists.
+        unsafe { std::env::set_var("NODE_COMPILE_CACHE", "node_modules/.cache/ream") };
+    }
+    spawn_node("node", &["dist/bin/server.js"])
+}
+
 pub fn spawn_node(cmd: &str, args: &[&str]) -> Result<(), String> {
     // Check we're in a Ream project
     if !std::path::Path::new("package.json").exists() {
@@ -126,66 +151,38 @@ fn env_files_in(dir: &std::path::Path) -> Vec<String> {
     found
 }
 
-/// Args for `ream dev` — Node's native watcher + `@swc-node/register`.
+/// Args for `ream dev`.
 ///
 /// swc-node reads `.swcrc` (which extends `@c9up/ream/swcrc.app.json`,
 /// `decoratorMetadata: true`) and EMITS `design:paramtypes` — required for IoC
 /// constructor injection. `tsx` / esbuild can NOT emit it, which silently broke
 /// DI in dev (every injected dependency resolved to `undefined`).
 ///
-/// `resources/` is deliberately absent: an asset watcher owns it, and a
-/// stylesheet edit must not restart the server.
-/// Whether the project can hot-reload — i.e. whether it has `hot-hook`.
+/// `@c9up/ream/hot` registers module hooks that track the import graph and swap
+/// a changed module inside the running process. Node's own `--watch` is
+/// deliberately ABSENT: it restarts on any change, which is exactly what hot
+/// reloading exists to avoid, and having both means the restart always wins.
 ///
-/// Upstream's dev server picks between an `hmr` mode and a `watch` mode the
-/// same way, and for the same reason: hot reloading needs a dependency the
-/// application declares, and a project that has not added it must keep working
-/// exactly as before rather than fail.
-pub fn hot_hook_is_installed() -> bool {
-    std::path::Path::new("node_modules/hot-hook").is_dir()
-}
-
-/// Args for `ream dev`, in either mode.
+/// There is no second mode any more. Hot reloading used to depend on the
+/// application having installed `hot-hook`, so a project created before that
+/// convention quietly restarted on every save instead — and was told nothing,
+/// because a restart looks like it is working. The loader is the framework's
+/// own now, so it is simply always there; a project that declares no
+/// boundaries gets a full reload for every change, which is the behaviour
+/// `--watch` gave it, by a shorter route.
 ///
-/// **HMR** (`hot-hook` present): `@c9up/ream/hot` registers a loader that
-/// tracks the import graph and swaps a changed module inside the running
-/// process. Node's own `--watch` is deliberately ABSENT here — it restarts on
-/// any change, which is exactly what hot reloading exists to avoid, and having
-/// both means the restart always wins.
-///
-/// **Watch** (no `hot-hook`): the previous behaviour, unchanged.
-///
-/// `resources/` is deliberately absent from the watched directories in both:
-/// an asset watcher owns it, and a stylesheet edit must not restart the server.
-pub fn dev_args_for(hmr: bool) -> Vec<String> {
-    let mut args = vec![
+/// `resources/` is deliberately absent from what the loader watches: an asset
+/// watcher owns it, and a stylesheet edit must not restart the server.
+pub fn dev_args() -> Vec<String> {
+    vec![
         "--import".to_string(),
         "@swc-node/register/esm-register".to_string(),
-    ];
-    if hmr {
         // After the TypeScript loader, never before: this file is TypeScript
         // itself and nothing can load it until swc-node is registered.
-        args.push("--import".to_string());
-        args.push("@c9up/ream/hot".to_string());
-    } else {
-        args.push("--watch".to_string());
-        for dir in crate::dev::WATCH_DIRS {
-            // Node refuses a --watch-path that does not exist, so a project
-            // without `database/` must not be handed one.
-            if std::path::Path::new(dir).is_dir() {
-                args.push(format!("--watch-path=./{}", dir));
-            }
-        }
-        // Env files sit at the ROOT, so no watched directory covers them and
-        // editing `.env` changed nothing until the server was restarted by
-        // hand — the values are read once, at boot. `@c9up/ream/hot` hands the
-        // same list to hot-hook for the HMR mode.
-        for file in env_files_in(std::path::Path::new(".")) {
-            args.push(format!("--watch-path=./{}", file));
-        }
-    }
-    args.push("bin/server.ts".to_string());
-    args
+        "--import".to_string(),
+        "@c9up/ream/hot".to_string(),
+        "bin/server.ts".to_string(),
+    ]
 }
 
 /// Read `assets` from the rc file, if the project has one.
@@ -230,20 +227,19 @@ pub fn run_dev() -> Result<(), String> {
     }
     require_ts_loader()?;
 
-    let hmr = hot_hook_is_installed();
     let assets = read_assets_config()?;
     let Some(watcher) = assets.dev_server else {
         // Nothing to run alongside: keep the plain path, where the server owns
         // the terminal and its output is not piped through a prefix.
-        let args = dev_args_for(hmr);
+        let args = dev_args();
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        if !hmr {
-            return spawn_node("node", &refs);
-        }
-        // In HMR mode the server asks for its own restart by exiting on a
+        // The server asks for its own restart by exiting on a
         // known code — see `EXIT_RESTART`. Without this loop that request is
         // just the dev server quitting, which is worse than no HMR at all.
-        let recoverable = crate::dev::watchable(crate::dev::WATCH_DIRS);
+        let recoverable = crate::dev::recoverable_paths(
+            crate::dev::WATCH_DIRS,
+            &env_files_in(std::path::Path::new(".")),
+        );
         loop {
             let status = inherited_status("node", &refs)?;
             match status.code() {
@@ -272,7 +268,7 @@ pub fn run_dev() -> Result<(), String> {
 
     let server = crate::dev::CommandSpec {
         command: "node".to_string(),
-        args: dev_args_for(hmr),
+        args: dev_args(),
     };
 
     crate::dev::run_together(
@@ -281,9 +277,10 @@ pub fn run_dev() -> Result<(), String> {
                 label: "server".to_string(),
                 colour: crate::dev::COLOURS[0],
                 spec: server,
-                // Only the server restarts itself; an asset watcher that exits has
-                // genuinely stopped.
-                restartable: hmr,
+                // Only the server restarts itself — it asks for it by exiting
+                // on `EXIT_RESTART`. An asset watcher that exits has genuinely
+                // stopped.
+                restartable: true,
             },
             crate::dev::Process {
                 label: "assets".to_string(),
@@ -1582,50 +1579,22 @@ mod tests {
         );
     }
 
+    /// Node's own watcher stays off, and no `--watch-path` is handed over.
+    ///
+    /// Both used to be there for the mode that had no hot reloading. The loader
+    /// watches the project itself now, from inside the process that holds the
+    /// import graph — and `--watch` restarts on any change, which would win
+    /// over every swap.
     #[test]
-    fn dev_watches_the_source_tree_not_only_the_loaded_graph() {
-        let dir =
-            std::env::temp_dir().join(format!("ream-dev-watch-{}-{}", std::process::id(), line!()));
-        let previous = std::env::current_dir().expect("cwd");
-        std::fs::create_dir_all(dir.join("app")).expect("app");
-        std::fs::create_dir_all(dir.join("config")).expect("config");
-        std::fs::write(dir.join(".env"), "PORT=3333").expect(".env");
-        std::fs::write(dir.join(".env.example"), "PORT=").expect(".env.example");
-        std::env::set_current_dir(&dir).expect("chdir");
-        let args = dev_args_for(false);
-        std::env::set_current_dir(previous).expect("restore");
-        let _ = std::fs::remove_dir_all(&dir);
-
-        // `--watch` alone watches only what Node LOADED. A file that fails to
-        // parse never enters the module graph, so correcting it leaves the
-        // server down with the error you already fixed.
+    fn dev_leaves_nodes_own_watcher_off() {
+        let args = dev_args();
         assert!(
-            args.iter().any(|a| a == "--watch-path=./app"),
-            "app/ must be watched by path: {:?}",
+            !args
+                .iter()
+                .any(|a| a == "--watch" || a.starts_with("--watch-path")),
+            "node's own watcher must be off: {:?}",
             args
         );
-        assert!(args.iter().any(|a| a == "--watch-path=./config"));
-        // A directory the project does not have must not be passed: Node
-        // refuses to start on a --watch-path that does not exist.
-        assert!(
-            !args.iter().any(|a| a == "--watch-path=./database"),
-            "a missing directory must not be watched: {:?}",
-            args
-        );
-        // The asset watcher owns `resources/`; a stylesheet edit must not
-        // restart the server.
-        assert!(!args.iter().any(|a| a.contains("resources")));
-        // `.env` is at the root, so no watched directory covers it: editing it
-        // used to change nothing until a manual restart.
-        assert!(
-            args.iter().any(|a| a == "--watch-path=./.env"),
-            ".env must be watched: {:?}",
-            args
-        );
-        // But not the template that documents it.
-        assert!(!args.iter().any(|a| a.contains(".env.example")));
-        // And the entry point stays last, where node expects the script.
-        assert_eq!(args.last().map(String::as_str), Some("bin/server.ts"));
     }
 
     /// HMR mode is not "watch plus a flag": Node's `--watch` restarts on any
@@ -1654,8 +1623,8 @@ mod tests {
     }
 
     #[test]
-    fn hmr_mode_drops_node_watch_and_loads_the_hot_entry() {
-        let args = dev_args_for(true);
+    fn dev_loads_the_hot_entry_after_the_typescript_loader() {
+        let args = dev_args();
 
         assert!(
             !args
@@ -1679,20 +1648,9 @@ mod tests {
         assert_eq!(args.last().map(String::as_str), Some("bin/server.ts"));
     }
 
-    /// A project that never added `hot-hook` must behave exactly as before —
-    /// the mode is chosen by what is installed, the way upstream chooses
-    /// between its `hmr` and `watch` modes.
-    #[test]
-    fn watch_mode_is_unchanged_and_carries_no_hot_entry() {
-        let args = dev_args_for(false);
-
-        assert!(args.iter().any(|a| a == "--watch"), "{:?}", args);
-        assert!(!args.iter().any(|a| a == "@c9up/ream/hot"), "{:?}", args);
-    }
-
     #[test]
     fn dev_uses_swc_node_not_tsx() {
-        let owned = dev_args_for(false);
+        let owned = dev_args();
         let args: Vec<&str> = owned.iter().map(String::as_str).collect();
         // swc-node emits design:paramtypes (decorator metadata) → IoC DI works.
         assert!(
@@ -1706,10 +1664,11 @@ mod tests {
             "ream dev must NOT use tsx (esbuild cannot emit design:paramtypes): {:?}",
             args
         );
-        // Native --watch drives the reload (replaces `tsx watch`).
+        // The loader drives the reload, from inside the process that holds the
+        // import graph — so node's own watcher must NOT be on as well.
         assert!(
-            args.contains(&"--watch"),
-            "ream dev must watch for changes: {:?}",
+            !args.contains(&"--watch"),
+            "ream dev must not restart on every change: {:?}",
             args
         );
     }

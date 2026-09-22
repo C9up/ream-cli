@@ -501,7 +501,7 @@ fn main() {
         }
         Commands::Add { package, dev, force, flags } => add::run(&package, dev, force, &flags),
         Commands::Dev => commands::run_dev(),
-        Commands::Start => commands::spawn_node("node", &["dist/bin/server.js"]),
+        Commands::Start => commands::run_start(),
         Commands::Build => commands::run_build(),
         Commands::Test {
             suites,

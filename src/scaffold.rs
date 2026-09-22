@@ -269,13 +269,8 @@ const DEV_DEPS: &[(&str, &str)] = &[
     // `tsconfig.app.json` declares `types: ["node"]`, so the app has to carry
     // the package that satisfies it — without this, a fresh project fails
     // typechecking before it compiles a line of its own code.
-    ("@types/node", "^22"),
+    ("@types/node", "^24"),
     ("@swc-node/register", "^1"),
-    // What makes `ream dev` hot-reload instead of restarting. A dev dependency
-    // of the APPLICATION, the way upstream puts it in its starter kit rather
-    // than in the framework: it has no business in a production install, and
-    // the CLI falls back to plain watching when it is absent.
-    ("hot-hook", "^1.0.0"),
     ("typescript", "^5.7"),
 ];
 
@@ -308,11 +303,15 @@ fn package_json(name: &str, template: &str) -> String {
 
     // What may be swapped in the running process instead of restarting it.
     //
-    // ENTRY MODULES ONLY, and each has to be reached by a DYNAMIC import — that
-    // is hot-hook's contract, not a preference. A `**` glob that also catches
-    // the components an entry imports statically makes them "wrongly imported"
-    // and every change falls back to a full reload, which looks exactly like
-    // hot reloading being broken.
+    // ENTRY MODULES ONLY, and each has to be reached by a DYNAMIC import. That
+    // is not a preference: a boundary is where the loader stops walking up,
+    // because whoever imports it will ask for it again — and a module reached
+    // by a static import never will. A `**` glob that also catches the
+    // components an entry imports statically therefore turns every change into
+    // a full reload, which looks exactly like hot reloading being broken.
+    //
+    // The key is `hotHook`, as upstream names it: an application moving over
+    // from AdonisJS keeps the block it already has.
     let boundaries = if boots_its_app(template) {
         "\n  \"hotHook\": {\n    \"boundaries\": [\n      \"./app/controllers/**/*.ts\",\n      \"./app/middleware/*.ts\"\n    ]\n  },"
     } else {
@@ -321,7 +320,7 @@ fn package_json(name: &str, template: &str) -> String {
 
     let imports = "    \"#app/WILDCARD\": \"./app/WILDCARD\",\n    \"#middleware/WILDCARD\": \"./app/middleware/WILDCARD\",\n    \"#config/WILDCARD\": \"./config/WILDCARD\",\n    \"#providers/WILDCARD\": \"./providers/WILDCARD\",\n    \"#start/WILDCARD\": \"./start/WILDCARD\"".replace("WILDCARD", "*");
 
-    format!("{{\n  \"name\": \"{}\",\n  \"version\": \"0.1.7\",\n  \"private\": true,\n  \"type\": \"module\",{}\n  \"imports\": {{\n{}\n  }},\n  \"scripts\": {{\n    \"dev\": \"ream dev\",\n    \"build\": \"ream build\",\n    \"start\": \"ream start\",\n    \"test\": \"{}\"\n  }},\n  \"dependencies\": {{\n    {}\n  }},\n  \"devDependencies\": {{\n    {}\n  }},\n  \"engines\": {{\n    \"node\": \">=22.0.0\"\n  }}\n}}", name, boundaries, imports, test_script, deps.join(",\n    "), dev_deps.join(",\n    "))
+    format!("{{\n  \"name\": \"{}\",\n  \"version\": \"0.1.7\",\n  \"private\": true,\n  \"type\": \"module\",{}\n  \"imports\": {{\n{}\n  }},\n  \"scripts\": {{\n    \"dev\": \"ream dev\",\n    \"build\": \"ream build\",\n    \"start\": \"ream start\",\n    \"test\": \"{}\"\n  }},\n  \"dependencies\": {{\n    {}\n  }},\n  \"devDependencies\": {{\n    {}\n  }},\n  \"engines\": {{\n    \"node\": \">=24.0.0\"\n  }}\n}}", name, boundaries, imports, test_script, deps.join(",\n    "), dev_deps.join(",\n    "))
 }
 
 /// Does this template start the application from the rc file?

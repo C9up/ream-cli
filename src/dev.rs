@@ -158,12 +158,31 @@ pub struct Snapshot {
 }
 
 /// Summarise what is under `dirs` right now.
-pub fn snapshot(dirs: &[String]) -> Snapshot {
+pub fn snapshot(paths: &[String]) -> Snapshot {
     let mut state = Snapshot::default();
-    for dir in dirs {
-        visit(Path::new(dir), &mut state);
+    for path in paths {
+        let path = Path::new(path);
+        if path.is_dir() {
+            visit(path, &mut state);
+        } else {
+            // A plain file, which is how the env files get here: they sit at
+            // the project root, so no watched directory covers them, and a
+            // server that died on a bad value in one would never notice the
+            // value being fixed.
+            record(path, &mut state);
+        }
     }
     state
+}
+
+/// Count one file into the snapshot and remember how recently it changed.
+fn record(file: &Path, state: &mut Snapshot) {
+    state.files += 1;
+    if let Ok(modified) = std::fs::metadata(file).and_then(|meta| meta.modified()) {
+        if let Ok(since) = modified.duration_since(UNIX_EPOCH) {
+            state.newest = state.newest.max(since.as_nanos());
+        }
+    }
 }
 
 fn visit(dir: &Path, state: &mut Snapshot) {
@@ -183,12 +202,7 @@ fn visit(dir: &Path, state: &mut Snapshot) {
             visit(&entry.path(), state);
             continue;
         }
-        state.files += 1;
-        if let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) {
-            if let Ok(since) = modified.duration_since(UNIX_EPOCH) {
-                state.newest = state.newest.max(since.as_nanos());
-            }
-        }
+        record(&entry.path(), state);
     }
 }
 
@@ -202,6 +216,24 @@ pub fn watchable(dirs: &[&str]) -> Vec<String> {
         .filter(|dir| Path::new(dir).is_dir())
         .map(|dir| (*dir).to_string())
         .collect()
+}
+
+/// The paths a crashed server waits on: the project's directories, plus the
+/// env files at its root.
+///
+/// The env files are named separately because they are not in any watched
+/// directory and are not modules either — nothing imports one, so the loader's
+/// own graph never sees them. Inside a running process that is handled by the
+/// restart list; out here, it is this.
+pub fn recoverable_paths(dirs: &[&str], env_files: &[String]) -> Vec<String> {
+    let mut paths = watchable(dirs);
+    paths.extend(
+        env_files
+            .iter()
+            .filter(|file| Path::new(file).is_file())
+            .cloned(),
+    );
+    paths
 }
 
 /// What the terminal says when the server died and the session did not.
