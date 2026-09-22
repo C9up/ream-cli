@@ -249,9 +249,28 @@ pub fn dev_args() -> Vec<String> {
 /// The rc file is TypeScript, so it is read by Node rather than parsed here —
 /// the same route `ream test` takes. A project without an rc file, or without
 /// an `assets` key, simply has nothing to run alongside the server.
-pub fn read_assets_config() -> Result<crate::dev::AssetsConfig, String> {
+pub struct RcSlice {
+    pub assets: crate::dev::AssetsConfig,
+    /// `metaFiles[].pattern`, verbatim. Expanded here, in Rust — see `glob_into`.
+    pub meta_file_patterns: Vec<String>,
+}
+
+/// Read the parts of the rc file the CLI acts on, in ONE Node call.
+///
+/// Node is not a convenience here and it is not avoidable: `reamrc.ts` is
+/// TypeScript, and `providers` is an array of `() => import(...)`. Nothing can
+/// read it without executing it. What IS avoidable is doing it twice, which is
+/// why `assets` and `metaFiles` come back together rather than one call each —
+/// `ream build` needs both.
+///
+/// Only the patterns come back. Expanding them is a directory walk and a
+/// string match, which the CLI does itself.
+pub fn read_rc() -> Result<RcSlice, String> {
     if !std::path::Path::new("reamrc.ts").exists() {
-        return Ok(crate::dev::AssetsConfig::default());
+        return Ok(RcSlice {
+            assets: crate::dev::AssetsConfig::default(),
+            meta_file_patterns: Vec::new(),
+        });
     }
 
     let output = Command::new("node")
@@ -261,22 +280,56 @@ pub fn read_assets_config() -> Result<crate::dev::AssetsConfig, String> {
             "--input-type=module",
             "-e",
             "const rc = (await import('./reamrc.ts')).default; \
-             process.stdout.write(JSON.stringify(rc?.assets ?? null));",
+             process.stdout.write(JSON.stringify({ \
+               assets: rc?.assets ?? null, \
+               metaFiles: rc?.metaFiles ?? [], \
+             }));",
         ])
         .output()
         .map_err(|e| format!("Failed to read reamrc.ts: {e}"))?;
 
     if !output.status.success() {
-        // A broken rc file must not silently drop the assets pipeline: say so
-        // rather than starting a server whose stylesheet nobody rebuilds.
+        // A broken rc file must not silently drop the assets pipeline or ship a
+        // `dist/` without its translations: say so rather than carrying on.
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "Could not read `assets` from reamrc.ts:\n{}",
-            stderr.trim()
-        ));
+        return Err(format!("Could not read reamrc.ts:\n{}", stderr.trim()));
     }
 
-    crate::dev::parse_assets(&String::from_utf8_lossy(&output.stdout))
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(raw.trim())
+        .map_err(|e| format!("reamrc.ts did not yield readable config: {e}"))?;
+
+    let assets = crate::dev::parse_assets(
+        &value
+            .get("assets")
+            .map_or_else(|| "null".to_string(), std::string::ToString::to_string),
+    )?;
+
+    let meta_file_patterns = value
+        .get("metaFiles")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .get("pattern")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(RcSlice {
+        assets,
+        meta_file_patterns,
+    })
+}
+
+/// The `assets` block alone, for the callers that need nothing else.
+pub fn read_assets_config() -> Result<crate::dev::AssetsConfig, String> {
+    Ok(read_rc()?.assets)
 }
 
 /// `ream dev` — the server, plus whatever the rc file says builds the assets.
@@ -363,7 +416,11 @@ pub fn run_build() -> Result<(), String> {
     }
     require_ts_loader()?;
 
-    if let Some(build) = read_assets_config()?.build {
+    // One read, both slices: the rc file is TypeScript and costs a Node process
+    // to read at all, so `assets` and `metaFiles` come back together.
+    let rc = read_rc()?;
+
+    if let Some(build) = rc.assets.build {
         let args: Vec<&str> = build.args.iter().map(String::as_str).collect();
         let status = inherited_status(&build.command, &args)?;
         if !status.success() {
@@ -376,7 +433,142 @@ pub fn run_build() -> Result<(), String> {
     }
 
     spawn_node("npx", &["tsc"])?;
-    make_output_self_contained()
+    make_output_self_contained(&rc.meta_file_patterns)
+}
+
+/// Does `path` satisfy `pattern`?
+///
+/// The glob subset a `metaFiles` entry actually uses, and no more: `*` within a
+/// segment, `**` across segments, and `{a,b}` alternation. Written out rather
+/// than pulled in, because the whole surface is three rules and a crate would
+/// bring a matcher for a syntax nothing here writes.
+///
+/// Segment-wise, which is what makes `**` mean "any depth" rather than "any
+/// characters" — a character-wise matcher lets `resources/*.json` reach
+/// `resources/lang/fr.json`, and the build then flattens a tree nobody asked it
+/// to.
+fn glob_matches(pattern: &str, path: &str) -> bool {
+    fn segments(value: &str) -> Vec<&str> {
+        value.split('/').filter(|part| !part.is_empty()).collect()
+    }
+    fn walk(pattern: &[&str], path: &[&str]) -> bool {
+        match pattern.split_first() {
+            None => path.is_empty(),
+            Some((&"**", rest)) => {
+                // Zero or more segments: try every split point.
+                (0..=path.len()).any(|skip| walk(rest, &path[skip..]))
+            }
+            Some((head, rest)) => match path.split_first() {
+                None => false,
+                Some((name, tail)) => segment_matches(head, name) && walk(rest, tail),
+            },
+        }
+    }
+    walk(&segments(pattern), &segments(path))
+}
+
+/// One path segment against one pattern segment: `*` and `{a,b}`.
+fn segment_matches(pattern: &str, name: &str) -> bool {
+    if let Some(open) = pattern.find('{') {
+        let Some(close) = pattern[open..].find('}').map(|at| at + open) else {
+            return literal_matches(pattern, name);
+        };
+        return pattern[open + 1..close].split(',').any(|option| {
+            segment_matches(
+                &format!("{}{option}{}", &pattern[..open], &pattern[close + 1..]),
+                name,
+            )
+        });
+    }
+    literal_matches(pattern, name)
+}
+
+/// `*` only, greedy with backtracking.
+fn literal_matches(pattern: &str, name: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == name,
+        Some((prefix, rest)) => {
+            if !name.starts_with(prefix) {
+                return false;
+            }
+            let remainder = &name[prefix.len()..];
+            (0..=remainder.len()).any(|take| literal_matches(rest, &remainder[take..]))
+        }
+    }
+}
+
+/// Every file under `root` that any pattern matches, as root-relative paths.
+///
+/// Depth-capped for the same reason `scan_files` is: a pattern is a string in a
+/// config file, and an unbounded walk follows whatever happens to be there.
+/// `node_modules` and `dist` are skipped outright — a pattern that reached into
+/// either would copy the build into itself.
+fn meta_files_matching(root: &std::path::Path, patterns: &[String]) -> Vec<String> {
+    fn walk(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        patterns: &[String],
+        depth: usize,
+        found: &mut Vec<String>,
+    ) {
+        if depth > 12 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if path.is_dir() {
+                if name == "node_modules" || name == "dist" || name.starts_with('.') {
+                    continue;
+                }
+                walk(root, &path, patterns, depth + 1, found);
+                continue;
+            }
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            if patterns
+                .iter()
+                .any(|pattern| glob_matches(pattern, &relative))
+            {
+                found.push(relative);
+            }
+        }
+    }
+
+    let mut found = Vec::new();
+    if !patterns.is_empty() {
+        walk(root, root, patterns, 0, &mut found);
+    }
+    found.sort();
+    found
+}
+
+/// Copy the files `metaFiles` names into the build output.
+///
+/// Paths keep their layout — `resources/lang/fr.json` lands at
+/// `dist/resources/lang/fr.json` — which is what lets a loader configured with
+/// `../resources/lang/` find them from `dist/`.
+fn copy_meta_files(out: &std::path::Path, patterns: &[String]) -> Result<(), String> {
+    let root =
+        std::env::current_dir().map_err(|e| format!("Could not resolve the project root: {e}"))?;
+
+    for relative in meta_files_matching(&root, patterns) {
+        let source = root.join(&relative);
+        let target = out.join(&relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
+        }
+        std::fs::copy(&source, &target)
+            .map_err(|e| format!("Could not copy {relative} into dist/: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Files copied beside the compiled output, in the order a package manager is
@@ -405,7 +597,7 @@ const BUILD_META_FILES: &[&str] = &[
 ///
 /// This is AdonisJS's shape — its `Bundler` declares the manifest and lockfile
 /// per package manager and copies them into the build output.
-fn make_output_self_contained() -> Result<(), String> {
+fn make_output_self_contained(meta_file_patterns: &[String]) -> Result<(), String> {
     let out = std::path::Path::new("dist");
     if !out.is_dir() {
         // `tsc` emitted nothing, which it reports itself; saying it twice helps
@@ -420,7 +612,8 @@ fn make_output_self_contained() -> Result<(), String> {
         std::fs::copy(source, out.join(name))
             .map_err(|e| format!("Could not copy {name} into dist/: {e}"))?;
     }
-    Ok(())
+    // And whatever the application declared as its own non-module files.
+    copy_meta_files(out, meta_file_patterns)
 }
 
 /// `repl` — an interactive shell with the application booted.
@@ -2003,5 +2196,137 @@ mod tests {
             "expected the 6 app-booting commands to guard on the TypeScript loader; \
              if you added or removed one, update this count deliberately"
         );
+    }
+}
+
+#[cfg(test)]
+mod meta_file_tests {
+    use super::{copy_meta_files, glob_matches, meta_files_matching};
+
+    #[test]
+    fn matches_a_literal_path() {
+        assert!(glob_matches("config/tokens.json", "config/tokens.json"));
+        assert!(!glob_matches("config/tokens.json", "config/other.json"));
+    }
+
+    #[test]
+    fn a_star_stays_inside_one_segment() {
+        assert!(glob_matches("resources/*.json", "resources/en.json"));
+        // The trap: a character-wise matcher lets this through and the build
+        // then flattens a tree nobody asked it to.
+        assert!(!glob_matches("resources/*.json", "resources/lang/en.json"));
+    }
+
+    #[test]
+    fn a_double_star_crosses_any_number_of_segments() {
+        assert!(glob_matches("resources/**/*.json", "resources/en.json"));
+        assert!(glob_matches(
+            "resources/**/*.json",
+            "resources/lang/en.json"
+        ));
+        assert!(glob_matches(
+            "resources/**/*.json",
+            "resources/lang/fr/deep/en.json"
+        ));
+        assert!(!glob_matches("resources/**/*.json", "public/en.json"));
+    }
+
+    #[test]
+    fn braces_offer_alternatives() {
+        let pattern = "resources/lang/**/*.{json,yaml,yml}";
+        assert!(glob_matches(pattern, "resources/lang/en.json"));
+        assert!(glob_matches(pattern, "resources/lang/fr.yaml"));
+        assert!(glob_matches(pattern, "resources/lang/it.yml"));
+        assert!(!glob_matches(pattern, "resources/lang/en.txt"));
+    }
+
+    #[test]
+    fn an_unclosed_brace_is_read_literally_rather_than_panicking() {
+        // A config file can hold anything; a malformed pattern must simply
+        // match nothing rather than take the build down.
+        assert!(!glob_matches("resources/{json", "resources/en.json"));
+    }
+
+    #[test]
+    fn walks_the_tree_and_reports_root_relative_paths() {
+        let dir = tempdir();
+        write(&dir, "resources/lang/en.json", "{}");
+        write(&dir, "resources/lang/fr/deep.json", "{}");
+        write(&dir, "resources/views/home.edge", "x");
+        write(&dir, "src/main.ts", "x");
+
+        let found = meta_files_matching(&dir, &["resources/lang/**/*.json".to_string()]);
+        assert_eq!(
+            found,
+            vec![
+                "resources/lang/en.json".to_string(),
+                "resources/lang/fr/deep.json".to_string(),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn never_walks_into_node_modules_or_dist() {
+        let dir = tempdir();
+        write(&dir, "node_modules/pkg/resources/lang/en.json", "{}");
+        write(&dir, "dist/resources/lang/en.json", "{}");
+        write(&dir, "resources/lang/en.json", "{}");
+
+        // A pattern reaching into `dist` would copy the build into itself.
+        let found = meta_files_matching(&dir, &["**/*.json".to_string()]);
+        assert_eq!(found, vec!["resources/lang/en.json".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn copies_into_the_output_keeping_the_layout() {
+        let dir = tempdir();
+        write(&dir, "resources/lang/en.json", "{\"a\":1}");
+        let out = dir.join("dist");
+        std::fs::create_dir_all(&out).unwrap();
+
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        let result = copy_meta_files(
+            std::path::Path::new("dist"),
+            &["resources/lang/**/*.json".to_string()],
+        );
+        std::env::set_current_dir(previous).unwrap();
+
+        assert!(result.is_ok(), "{result:?}");
+        // The layout is the point: a loader configured with `../resources/lang/`
+        // finds it from `dist/` only if the path survived the copy.
+        let copied = out.join("resources/lang/en.json");
+        assert!(copied.is_file(), "expected {}", copied.display());
+        assert_eq!(std::fs::read_to_string(copied).unwrap(), "{\"a\":1}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn no_patterns_means_no_walk_and_no_copy() {
+        let dir = tempdir();
+        write(&dir, "resources/lang/en.json", "{}");
+        assert!(meta_files_matching(&dir, &[]).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn tempdir() -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "ream-meta-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        base.canonicalize().unwrap()
+    }
+
+    fn write(root: &std::path::Path, relative: &str, contents: &str) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
     }
 }
