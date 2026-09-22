@@ -95,12 +95,71 @@ fn signal_outcome(_status: &std::process::ExitStatus) -> Result<(), String> {
 /// An existing value is left alone: an operator who pointed the cache somewhere
 /// else, or emptied the variable to turn it off, meant it.
 pub fn run_start() -> Result<(), String> {
+    // Where the application's `.env*` files are, which after a build is not
+    // where the application is: `start/env.js` resolves its root from its own
+    // URL and lands inside `dist/`, so the files at the project root become
+    // invisible and `start` dies on a `.env` it is standing next to.
+    //
+    // `ENV_PATH` is AdonisJS's own variable for this, and a directory as it is
+    // there. A variable rather than `--env-file`: node applies those last-wins
+    // while the framework's loader applies them most-specific-first, and a
+    // second copy of that ordering rule here would be one to keep in step
+    // forever.
+    //
+    // Only when the project actually has one of those files. Setting it
+    // regardless would turn "this application has no env file" into an error,
+    // because naming a directory that holds none is upstream's way of saying
+    // the path is wrong.
+    if std::env::var_os("ENV_PATH").is_none() && !env_files_in(std::path::Path::new(".")).is_empty()
+    {
+        if let Ok(root) = std::env::current_dir() {
+            unsafe { std::env::set_var("ENV_PATH", root) };
+        }
+    }
+
     if std::env::var_os("NODE_COMPILE_CACHE").is_none() {
         // Under `node_modules` with the other build artefacts, so deleting that
         // directory clears the cache too and nothing has to know it exists.
         unsafe { std::env::set_var("NODE_COMPILE_CACHE", "node_modules/.cache/ream") };
     }
+    if let Some(reason) = dependency_served_as_typescript() {
+        // Refused rather than attempted: node would fail a second later with
+        // ERR_MODULE_NOT_FOUND for a file that is exactly where it says it is,
+        // and that trace says nothing about why.
+        return Err(reason);
+    }
     spawn_node("node", &["dist/bin/server.js"])
+}
+
+/// Whether a linked dependency answers with TypeScript rather than JavaScript.
+///
+/// `start` runs plain `node`, deliberately: a production install has no
+/// TypeScript loader and should not need one. Inside this repository's own
+/// workspace, though, `@c9up/*` packages point their exports at `./src/*.ts`
+/// so development happens against the sources — `publishConfig` rewrites them
+/// to `./dist/*.js` on the way to the registry. A built application there
+/// therefore imports a `.ts` file and dies on `ERR_MODULE_NOT_FOUND` for a
+/// module that is right where it says it is.
+///
+/// Saying so beats the stack trace: the failure is about how the dependency is
+/// linked, and nothing in that trace mentions it.
+fn dependency_served_as_typescript() -> Option<String> {
+    let manifest = std::fs::read_to_string("node_modules/@c9up/ream/package.json").ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&manifest).ok()?;
+    let exports = parsed.get("exports")?.to_string();
+    if !exports.contains(".ts\"") {
+        return None;
+    }
+    Some(
+        [
+            "`@c9up/ream` resolves to TypeScript sources, which `ream start` cannot load:",
+            "it runs plain node, because a production install has no TypeScript loader.",
+            "A workspace checkout links the framework that way on purpose; a registry",
+            "install resolves to compiled JavaScript and starts normally.",
+            "Use `ream dev` here.",
+        ]
+        .join("\n  "),
+    )
 }
 
 pub fn spawn_node(cmd: &str, args: &[&str]) -> Result<(), String> {
@@ -316,7 +375,52 @@ pub fn run_build() -> Result<(), String> {
         }
     }
 
-    spawn_node("npx", &["tsc"])
+    spawn_node("npx", &["tsc"])?;
+    make_output_self_contained()
+}
+
+/// Files copied beside the compiled output, in the order a package manager is
+/// likely to be in use. Only those that exist are copied.
+const BUILD_META_FILES: &[&str] = &[
+    "package.json",
+    "pnpm-lock.yaml",
+    "package-lock.json",
+    "yarn.lock",
+    "bun.lockb",
+];
+
+/// Copy the manifest and the lockfile into `dist/`.
+///
+/// Not a convenience: without the manifest the build does not run at all.
+/// `dist/reamrc.js` imports `#providers/AppProvider.js`, and Node resolves a
+/// `#` specifier against the package.json that governs the importing FILE —
+/// walking up from `dist/`. With none there it reaches the project root, whose
+/// `imports` map points at `./providers/*`: the TypeScript sources, which have
+/// no `.js` to find. `ream start` then died on a module it had just compiled.
+///
+/// A copy inside `dist/` makes the same map resolve to `dist/providers/*`,
+/// which is where the output is. The lockfile rides along for the same reason
+/// upstream's bundler copies it: the folder is then something a deployment can
+/// install dependencies into on its own.
+///
+/// This is AdonisJS's shape — its `Bundler` declares the manifest and lockfile
+/// per package manager and copies them into the build output.
+fn make_output_self_contained() -> Result<(), String> {
+    let out = std::path::Path::new("dist");
+    if !out.is_dir() {
+        // `tsc` emitted nothing, which it reports itself; saying it twice helps
+        // nobody.
+        return Ok(());
+    }
+    for name in BUILD_META_FILES {
+        let source = std::path::Path::new(name);
+        if !source.is_file() {
+            continue;
+        }
+        std::fs::copy(source, out.join(name))
+            .map_err(|e| format!("Could not copy {name} into dist/: {e}"))?;
+    }
+    Ok(())
 }
 
 /// `repl` — an interactive shell with the application booted.
