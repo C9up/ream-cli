@@ -97,22 +97,34 @@ pub fn spawn_node(cmd: &str, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-/// The project directories `ream dev` watches, when they exist.
+/// The `.env*` files sitting in `dir`.
 ///
-/// Node's `--watch` alone watches only the modules it managed to LOAD. A file
-/// that fails to parse never enters the module graph, so fixing it changes
-/// nothing the watcher is looking at: the server stays down, reporting the
-/// syntax error you already corrected, until the entry point itself is touched.
-/// `--watch-path` watches a directory whatever the graph contains.
-const WATCH_DIRS: &[&str] = &[
-    "app",
-    "bin",
-    "config",
-    "start",
-    "database",
-    "providers",
-    "commands",
-];
+/// Listed from the directory rather than rebuilt from `NODE_ENV`: which names
+/// are loaded (and how `prod` becomes `production`) lives in `@c9up/ream`'s env
+/// loader, and a second copy of that rule here would drift from it.
+fn env_files_in(dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_string();
+            if !name.starts_with(".env") {
+                return None;
+            }
+            // A template is not configuration: restarting the server because
+            // someone documented a variable would be a restart for nothing.
+            if name.ends_with(".example") || name.ends_with(".sample") {
+                return None;
+            }
+            entry.file_type().ok()?.is_file().then_some(name)
+        })
+        .collect();
+    // `read_dir` has no defined order, and the argument list has to be stable.
+    found.sort();
+    found
+}
 
 /// Args for `ream dev` — Node's native watcher + `@swc-node/register`.
 ///
@@ -157,12 +169,19 @@ pub fn dev_args_for(hmr: bool) -> Vec<String> {
         args.push("@c9up/ream/hot".to_string());
     } else {
         args.push("--watch".to_string());
-        for dir in WATCH_DIRS {
+        for dir in crate::dev::WATCH_DIRS {
             // Node refuses a --watch-path that does not exist, so a project
             // without `database/` must not be handed one.
             if std::path::Path::new(dir).is_dir() {
                 args.push(format!("--watch-path=./{}", dir));
             }
+        }
+        // Env files sit at the ROOT, so no watched directory covers them and
+        // editing `.env` changed nothing until the server was restarted by
+        // hand — the values are read once, at boot. `@c9up/ream/hot` hands the
+        // same list to hot-hook for the HMR mode.
+        for file in env_files_in(std::path::Path::new(".")) {
+            args.push(format!("--watch-path=./{}", file));
         }
     }
     args.push("bin/server.ts".to_string());
@@ -224,11 +243,23 @@ pub fn run_dev() -> Result<(), String> {
         // In HMR mode the server asks for its own restart by exiting on a
         // known code — see `EXIT_RESTART`. Without this loop that request is
         // just the dev server quitting, which is worse than no HMR at all.
+        let recoverable = crate::dev::watchable(crate::dev::WATCH_DIRS);
         loop {
             let status = inherited_status("node", &refs)?;
             match status.code() {
                 Some(crate::dev::EXIT_RESTART) => continue,
+                // Exit 0 is a session that ENDED: it is how the graceful
+                // shutdown leaves on Ctrl-C, and waiting for an edit there
+                // would hang the terminal it just gave back.
                 Some(0) => return Ok(()),
+                // Anything else is a crash, and the watcher that would have
+                // seen the fix died inside the process — so it is watched from
+                // here instead. A syntax error used to end the session.
+                Some(code) if !recoverable.is_empty() => {
+                    eprintln!("{}", crate::dev::crash_notice(code));
+                    crate::dev::wait_for_change(&recoverable);
+                    continue;
+                }
                 Some(code) => return Err(format!("'node' exited with code {code}")),
                 // No code means a SIGNAL, not a clean exit — `None` used to be
                 // folded in with success, so a segfault in a native addon or a
@@ -244,22 +275,25 @@ pub fn run_dev() -> Result<(), String> {
         args: dev_args_for(hmr),
     };
 
-    crate::dev::run_together(vec![
-        crate::dev::Process {
-            label: "server".to_string(),
-            colour: crate::dev::COLOURS[0],
-            spec: server,
-            // Only the server restarts itself; an asset watcher that exits has
-            // genuinely stopped.
-            restartable: hmr,
-        },
-        crate::dev::Process {
-            label: "assets".to_string(),
-            colour: crate::dev::COLOURS[1],
-            spec: watcher,
-            restartable: false,
-        },
-    ])
+    crate::dev::run_together(
+        vec![
+            crate::dev::Process {
+                label: "server".to_string(),
+                colour: crate::dev::COLOURS[0],
+                spec: server,
+                // Only the server restarts itself; an asset watcher that exits has
+                // genuinely stopped.
+                restartable: hmr,
+            },
+            crate::dev::Process {
+                label: "assets".to_string(),
+                colour: crate::dev::COLOURS[1],
+                spec: watcher,
+                restartable: false,
+            },
+        ],
+        crate::dev::WATCH_DIRS,
+    )
 }
 
 /// `ream build` — the assets first, then TypeScript.
@@ -1529,12 +1563,34 @@ mod tests {
     }
 
     #[test]
+    fn only_real_env_files_are_listed() {
+        let dir =
+            std::env::temp_dir().join(format!("ream-env-list-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".env.d")).expect("a directory named like one");
+        std::fs::write(dir.join(".env"), "").expect(".env");
+        std::fs::write(dir.join(".env.production"), "").expect(".env.production");
+        std::fs::write(dir.join(".env.example"), "").expect(".env.example");
+        std::fs::write(dir.join("env.ts"), "").expect("env.ts");
+
+        let found = env_files_in(&dir);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            found,
+            vec![".env".to_string(), ".env.production".to_string()]
+        );
+    }
+
+    #[test]
     fn dev_watches_the_source_tree_not_only_the_loaded_graph() {
         let dir =
             std::env::temp_dir().join(format!("ream-dev-watch-{}-{}", std::process::id(), line!()));
         let previous = std::env::current_dir().expect("cwd");
         std::fs::create_dir_all(dir.join("app")).expect("app");
         std::fs::create_dir_all(dir.join("config")).expect("config");
+        std::fs::write(dir.join(".env"), "PORT=3333").expect(".env");
+        std::fs::write(dir.join(".env.example"), "PORT=").expect(".env.example");
         std::env::set_current_dir(&dir).expect("chdir");
         let args = dev_args_for(false);
         std::env::set_current_dir(previous).expect("restore");
@@ -1559,6 +1615,15 @@ mod tests {
         // The asset watcher owns `resources/`; a stylesheet edit must not
         // restart the server.
         assert!(!args.iter().any(|a| a.contains("resources")));
+        // `.env` is at the root, so no watched directory covers it: editing it
+        // used to change nothing until a manual restart.
+        assert!(
+            args.iter().any(|a| a == "--watch-path=./.env"),
+            ".env must be watched: {:?}",
+            args
+        );
+        // But not the template that documents it.
+        assert!(!args.iter().any(|a| a.contains(".env.example")));
         // And the entry point stays last, where node expects the script.
         assert_eq!(args.last().map(String::as_str), Some("bin/server.ts"));
     }
