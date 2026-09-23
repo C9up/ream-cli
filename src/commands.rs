@@ -763,13 +763,23 @@ pub fn run_generate_key(force: bool, show: bool) -> Result<(), String> {
     std::fs::write(env_path, updated).map_err(|e| format!("Failed to write .env: {}", e))?;
 
     println!();
-    println!("  \x1b[32mGenerated APP_KEY\x1b[0m");
-    println!(
-        "  APP_KEY = [redacted — written to .env, {} chars]",
-        key.chars().count()
-    );
-    println!();
-    println!("  Move it to a secrets manager before deploying.");
+    let lines = vec![
+        crate::ui::paint("Generated APP_KEY", crate::ui::GREEN),
+        format!(
+            "APP_KEY = [redacted — written to .env, {} chars]",
+            key.chars().count()
+        ),
+        String::new(),
+        crate::ui::paint(
+            "Move it to a secrets manager before deploying.",
+            crate::ui::DIM,
+        ),
+    ];
+    for line in crate::ui::sticker(&lines, |character| {
+        crate::ui::paint(character, crate::ui::DIM)
+    }) {
+        println!("{line}");
+    }
     println!();
     Ok(())
 }
@@ -1060,7 +1070,9 @@ pub struct ListEntry {
 /// Report why the app's commands are missing from `ream list`, on stderr so the
 /// list itself stays pipeable.
 fn warn_app_commands(reason: &str) {
-    eprintln!("warning: this project's own commands are not listed — {reason}");
+    crate::ui::warning(&format!(
+        "this project's own commands are not listed — {reason}"
+    ));
 }
 
 /// `ream list` — one list covering this binary's commands and the app's own.
@@ -1111,15 +1123,23 @@ pub fn run_list(
         }
     }
 
+    // One width for the WHOLE listing, not one per group: the descriptions of
+    // every section then line up in a single column, which is what makes a
+    // long list scannable. Measured on the visible width — the names are
+    // coloured below, and escape codes occupy no column.
     let width = entries
         .iter()
-        .map(|entry| entry.name.len())
+        .map(|entry| crate::ui::display_width(&entry.name))
         .max()
         .unwrap_or(0);
     let mut current_group: Option<String> = None;
 
     println!();
-    println!("Usage: ream <command> [options]");
+    println!(
+        "{} ream <command> {}",
+        crate::ui::heading("Usage:"),
+        crate::ui::paint("[options]", crate::ui::DIM)
+    );
     println!();
 
     for entry in &entries {
@@ -1130,19 +1150,18 @@ pub fn run_list(
             }
             println!(
                 "{}",
-                if group.is_empty() {
+                crate::ui::heading(if group.is_empty() {
                     "Available commands"
                 } else {
                     group.as_str()
-                }
+                })
             );
             current_group = Some(group);
         }
         println!(
-            "  {:width$}  {}",
-            entry.name,
-            entry.description,
-            width = width
+            "  {}  {}",
+            crate::ui::pad_end(&crate::ui::paint(&entry.name, crate::ui::GREEN), width),
+            crate::ui::paint(&entry.description, crate::ui::DIM)
         );
     }
     println!();
@@ -1372,46 +1391,92 @@ pub fn run_inspect() -> Result<(), String> {
 
 /// Show version and environment info.
 pub fn info() -> Result<(), String> {
-    println!("ream {}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "{} {}",
+        crate::ui::paint("ream", crate::ui::BOLD),
+        env!("CARGO_PKG_VERSION")
+    );
     println!();
 
     // Node.js version
     match Command::new("node").arg("--version").output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            println!("  Node.js:  {}", version);
+            println!(
+                "  {}  {}",
+                crate::ui::paint("Node.js:", crate::ui::DIM),
+                version
+            );
         }
-        Ok(_) => println!("  Node.js:  error"),
-        Err(_) => println!("  Node.js:  not found"),
+        Ok(_) => println!(
+            "  {}  {}",
+            crate::ui::paint("Node.js:", crate::ui::DIM),
+            crate::ui::paint("error", crate::ui::YELLOW)
+        ),
+        Err(_) => println!(
+            "  {}  {}",
+            crate::ui::paint("Node.js:", crate::ui::DIM),
+            crate::ui::paint("not found", crate::ui::YELLOW)
+        ),
     }
 
     // pnpm version
     match Command::new("pnpm").arg("--version").output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            println!("  pnpm:     {}", version);
+            println!(
+                "  {}     {}",
+                crate::ui::paint("pnpm:", crate::ui::DIM),
+                version
+            );
         }
-        Ok(_) => println!("  pnpm:     error"),
-        Err(_) => println!("  pnpm:     not found"),
+        Ok(_) => println!(
+            "  {}     {}",
+            crate::ui::paint("pnpm:", crate::ui::DIM),
+            crate::ui::paint("error", crate::ui::YELLOW)
+        ),
+        Err(_) => println!(
+            "  {}     {}",
+            crate::ui::paint("pnpm:", crate::ui::DIM),
+            crate::ui::paint("not found", crate::ui::YELLOW)
+        ),
     }
 
     // Rust version
     match Command::new("rustc").arg("--version").output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            println!("  Rust:     {}", version);
+            println!(
+                "  {}     {}",
+                crate::ui::paint("Rust:", crate::ui::DIM),
+                version
+            );
         }
-        Ok(_) => println!("  Rust:     error"),
-        Err(_) => println!("  Rust:     not found"),
+        Ok(_) => println!(
+            "  {}     {}",
+            crate::ui::paint("Rust:", crate::ui::DIM),
+            crate::ui::paint("error", crate::ui::YELLOW)
+        ),
+        Err(_) => println!(
+            "  {}     {}",
+            crate::ui::paint("Rust:", crate::ui::DIM),
+            crate::ui::paint("not found", crate::ui::YELLOW)
+        ),
     }
 
     // Check if in a Ream project
     if std::path::Path::new("reamrc.ts").exists() {
         println!();
-        println!("  Project:  reamrc.ts found (framework mode)");
+        println!(
+            "  {}  reamrc.ts found (framework mode)",
+            crate::ui::paint("Project:", crate::ui::DIM)
+        );
     } else if std::path::Path::new("package.json").exists() {
         println!();
-        println!("  Project:  package.json found (toolkit mode)");
+        println!(
+            "  {}  package.json found (toolkit mode)",
+            crate::ui::paint("Project:", crate::ui::DIM)
+        );
     }
 
     Ok(())

@@ -14,6 +14,7 @@ mod mcp;
 mod scaffold;
 mod stubs;
 mod template;
+mod ui;
 
 use clap::{Parser, Subcommand};
 
@@ -443,7 +444,7 @@ fn main() {
         // `run_list` prints its own usage line; clap's would be a second one
         // saying the same thing in a different shape.
         if let Err(err) = commands::run_list(&framework_commands(), false, &[]) {
-            eprintln!("{err}");
+            ui::error(&err);
             std::process::exit(1);
         }
         return;
@@ -475,7 +476,7 @@ fn main() {
         if commands::app_declares_command(name) {
             let argv: Vec<String> = std::env::args().skip(1).collect();
             if let Err(e) = commands::run_console(&argv) {
-                eprintln!("error: {}", e);
+                ui::error(&e);
                 std::process::exit(1);
             }
             return;
@@ -604,12 +605,9 @@ fn main() {
     };
 
     if let Err(e) = result {
-        use std::io::IsTerminal;
-        if std::io::stderr().is_terminal() {
-            eprintln!("\x1b[31merror\x1b[0m: {}", e);
-        } else {
-            eprintln!("error: {}", e);
-        }
+        // A badge rather than a level label: this is the last thing the
+        // process says, and it has to be findable in a scrolled terminal.
+        eprintln!("{}", ui::error_badge(&e.to_string()));
         std::process::exit(1);
     }
 }

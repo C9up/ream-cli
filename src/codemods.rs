@@ -289,7 +289,9 @@ pub fn configure_with_flags(
         return Err(format!("Configure failed for '{}'", package));
     }
 
-    println!("\n  \x1b[32mDone!\x1b[0m {} configured.\n", package);
+    println!();
+    crate::ui::success(&format!("{} configured.", package));
+    println!();
     Ok(ConfigureOutcome::Configured)
 }
 

@@ -17,7 +17,7 @@ enum Status {
 }
 
 pub fn run() -> Result<(), String> {
-    println!("\n  \x1b[1mReam Doctor\x1b[0m\n");
+    println!("\n  {}\n", crate::ui::paint("Ream Doctor", crate::ui::BOLD));
 
     let checks = vec![
         check_node_version(),
@@ -38,26 +38,32 @@ pub fn run() -> Result<(), String> {
         let icon = match check.status {
             Status::Pass => {
                 passed += 1;
-                "\x1b[32m[OK]\x1b[0m"
+                crate::ui::paint("[OK]", crate::ui::GREEN)
             }
             Status::Warn => {
                 warns += 1;
-                "\x1b[33m[!!]\x1b[0m"
+                crate::ui::paint("[!!]", crate::ui::YELLOW)
             }
             Status::Fail => {
                 fails += 1;
-                "\x1b[31m[XX]\x1b[0m"
+                crate::ui::paint("[XX]", crate::ui::RED)
             }
         };
         println!("  {} {}: {}", icon, check.name, check.message);
         if let Some(ref fix) = check.fix {
-            println!("      Fix: {}", fix);
+            println!(
+                "      {} {}",
+                crate::ui::paint("Fix:", crate::ui::CYAN),
+                fix
+            );
         }
     }
 
     println!(
         "\n  {} passed, {} warnings, {} failed\n",
-        passed, warns, fails
+        crate::ui::paint(&passed.to_string(), crate::ui::GREEN),
+        crate::ui::paint(&warns.to_string(), crate::ui::YELLOW),
+        crate::ui::paint(&fails.to_string(), crate::ui::RED)
     );
 
     if fails > 0 {

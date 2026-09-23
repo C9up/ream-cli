@@ -393,7 +393,9 @@ pub fn run(spec: &str, dev: bool, force: bool, flags: &[String]) -> Result<(), S
     // whatever pnpm/yarn/npm just installed.
     match codemods::configure_with_flags(&bare, force, &pairs)? {
         codemods::ConfigureOutcome::Configured => {
-            println!("\n  \x1b[32mDone!\x1b[0m {} added.\n", full_spec);
+            println!();
+            crate::ui::success(&format!("{} added.", full_spec));
+            println!();
         }
         codemods::ConfigureOutcome::NoHook => {
             println!(

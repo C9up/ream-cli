@@ -62,18 +62,24 @@ pub fn install() -> Result<(), String> {
     );
     save(&root)?;
 
+    println!();
     if existed {
-        println!("\n  \x1b[32mUpdated\x1b[0m '{SERVER_KEY}' MCP server in {CONFIG}");
+        crate::ui::success(&format!("updated '{SERVER_KEY}' in {CONFIG}"));
     } else {
-        println!("\n  \x1b[32mRegistered\x1b[0m '{SERVER_KEY}' ({PACKAGE}) in {CONFIG}");
+        crate::ui::success(&format!(
+            "registered '{SERVER_KEY}' ({PACKAGE}) in {CONFIG}"
+        ));
     }
-    println!("  Restart your MCP client (Claude Code / Cursor / …) to pick it up.\n");
+    crate::ui::info("restart your MCP client (Claude Code / Cursor / …) to pick it up");
+    println!();
     Ok(())
 }
 
 pub fn uninstall() -> Result<(), String> {
     if !Path::new(CONFIG).exists() {
-        println!("\n  {CONFIG} not found — nothing to remove.\n");
+        println!();
+        crate::ui::info(&format!("{CONFIG} not found — nothing to remove"));
+        println!();
         return Ok(());
     }
     let mut root = load()?;
@@ -84,12 +90,16 @@ pub fn uninstall() -> Result<(), String> {
         .map(|servers| servers.remove(SERVER_KEY).is_some())
         .unwrap_or(false);
 
+    println!();
     if removed {
         save(&root)?;
-        println!("\n  \x1b[32mRemoved\x1b[0m '{SERVER_KEY}' from {CONFIG}\n");
+        crate::ui::success(&format!("removed '{SERVER_KEY}' from {CONFIG}"));
     } else {
-        println!("\n  '{SERVER_KEY}' was not registered in {CONFIG} — nothing to do.\n");
+        crate::ui::info(&format!(
+            "'{SERVER_KEY}' was not registered in {CONFIG} — nothing to do"
+        ));
     }
+    println!();
     Ok(())
 }
 
@@ -98,17 +108,25 @@ pub fn status() -> Result<(), String> {
     let entry = root.get("mcpServers").and_then(|s| s.get(SERVER_KEY));
     match entry {
         Some(e) => {
-            println!("\n  ream MCP: \x1b[32minstalled\x1b[0m in {CONFIG}");
+            println!();
+            crate::ui::success(&format!("ream MCP is installed in {CONFIG}"));
             if let Some(dir) = e
                 .get("env")
                 .and_then(|env| env.get("REAM_PROJECT_ROOT"))
                 .and_then(|v| v.as_str())
             {
-                println!("    REAM_PROJECT_ROOT: {dir}");
+                println!(
+                    "    {} {dir}",
+                    crate::ui::paint("REAM_PROJECT_ROOT:", crate::ui::DIM)
+                );
             }
             println!();
         }
-        None => println!("\n  ream MCP: \x1b[33mnot installed\x1b[0m — run `ream mcp install`\n"),
+        None => {
+            println!();
+            crate::ui::warning("ream MCP is not installed — run `ream mcp install`");
+            println!();
+        }
     }
     Ok(())
 }
