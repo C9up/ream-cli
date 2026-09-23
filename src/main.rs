@@ -9,10 +9,8 @@ mod commands;
 mod dev;
 mod doctor;
 mod envfile;
-mod generator;
 mod mcp;
 mod scaffold;
-mod stubs;
 mod template;
 mod ui;
 
@@ -36,17 +34,6 @@ struct Cli {
     /// Optional: `ream` with no command lists them, as a bare `ream` does.
     #[command(subcommand)]
     command: Option<Commands>,
-}
-
-/// Common flags shared by every `make:*` generator.
-#[derive(clap::Args, Clone, Copy)]
-struct GenFlags {
-    /// Plan files only — emit JSON to stdout, write nothing to disk.
-    #[arg(long)]
-    dry_run: bool,
-    /// Allow overwriting existing files.
-    #[arg(long)]
-    force: bool,
 }
 
 #[derive(Subcommand)]
@@ -139,110 +126,6 @@ enum Commands {
         /// Comma-separated globs to leave out of the measurement
         #[arg(long = "coverage-exclude")]
         coverage_exclude: Option<String>,
-    },
-
-    /// Generate a service class
-    #[command(name = "make:service")]
-    MakeService {
-        module: String,
-        name: String,
-        #[command(flatten)]
-        flags: GenFlags,
-    },
-
-    /// Generate an entity with decorators
-    #[command(name = "make:entity")]
-    MakeEntity {
-        module: String,
-        name: String,
-        #[command(flatten)]
-        flags: GenFlags,
-    },
-
-    /// Generate a controller with CRUD methods
-    #[command(name = "make:controller")]
-    MakeController {
-        module: String,
-        name: String,
-        #[command(flatten)]
-        flags: GenFlags,
-    },
-
-    /// Generate a validation schema
-    #[command(name = "make:validator")]
-    MakeValidator {
-        module: String,
-        name: String,
-        #[command(flatten)]
-        flags: GenFlags,
-    },
-
-    /// Generate a console command in commands/ (auto-discovered, run as `ream <name>`)
-    #[command(name = "make:command")]
-    MakeCommand {
-        name: String,
-        #[command(flatten)]
-        flags: GenFlags,
-    },
-
-    /// Generate an HTTP middleware in app/middleware/
-    #[command(name = "make:middleware")]
-    MakeMiddleware {
-        name: String,
-        /// Middleware stack it is registered in: server, named, or router
-        #[arg(long, default_value = "router")]
-        stack: String,
-        #[command(flatten)]
-        flags: GenFlags,
-    },
-
-    /// Generate an event class in app/events/
-    #[command(name = "make:event")]
-    MakeEvent {
-        name: String,
-        #[command(flatten)]
-        flags: GenFlags,
-    },
-
-    /// Generate an event listener in app/listeners/
-    #[command(name = "make:listener")]
-    MakeListener {
-        name: String,
-        /// Event class the listener handles (typed import + registration hint)
-        #[arg(long)]
-        event: Option<String>,
-        #[command(flatten)]
-        flags: GenFlags,
-    },
-
-    /// Generate a provider with lifecycle hooks
-    #[command(name = "make:provider")]
-    MakeProvider {
-        name: String,
-        #[command(flatten)]
-        flags: GenFlags,
-    },
-
-    /// Publish a make: template into `stubs/make/` so the project can edit it
-    #[command(name = "stubs:publish")]
-    StubsPublish {
-        /// Which stub to publish; omit to publish every one
-        kind: Option<String>,
-        /// List the publishable stubs and the variables each exposes
-        #[arg(long)]
-        list: bool,
-        /// Overwrite a stub the project already published
-        #[arg(long)]
-        force: bool,
-    },
-
-    /// Generate a full resource module (entity + controller + validator + migration)
-    #[command(name = "make:module")]
-    MakeModule {
-        module: String,
-        name: String,
-        #[command(flatten)]
-        flags: GenFlags,
     },
 
     /// Configure a package (auto-setup provider, config, env)
@@ -529,54 +412,6 @@ fn main() {
                 exclude: coverage_exclude.as_deref(),
             },
         ),
-        Commands::MakeService { module, name, flags } => {
-            generator::make("service", &module, &name, flags.dry_run, flags.force)
-        }
-        Commands::MakeEntity { module, name, flags } => {
-            generator::make("entity", &module, &name, flags.dry_run, flags.force)
-        }
-        Commands::MakeController { module, name, flags } => {
-            generator::make("controller", &module, &name, flags.dry_run, flags.force)
-        }
-        Commands::MakeValidator { module, name, flags } => {
-            generator::make("validator", &module, &name, flags.dry_run, flags.force)
-        }
-        Commands::MakeCommand { name, flags } => {
-            generator::make("command", "", &name, flags.dry_run, flags.force)
-        }
-        Commands::MakeMiddleware { name, stack, flags } => {
-            generator::make_with_option("middleware", &name, Some(&stack), flags.dry_run, flags.force)
-        }
-        Commands::MakeEvent { name, flags } => {
-            generator::make_with_option("event", &name, None, flags.dry_run, flags.force)
-        }
-        Commands::MakeListener { name, event, flags } => {
-            generator::make_with_option(
-                "listener",
-                &name,
-                event.as_deref(),
-                flags.dry_run,
-                flags.force,
-            )
-        }
-        Commands::MakeProvider { name, flags } => {
-            generator::make("provider", "", &name, flags.dry_run, flags.force)
-        }
-        Commands::StubsPublish { kind, list, force } => {
-            if list {
-                println!("Publishable stubs (written to {}/):", stubs::STUBS_DIR);
-                for name in stubs::PUBLISHABLE {
-                    let vars = generator::stub_variables(name).unwrap_or_default();
-                    println!("  {name:<12} {{{{ {} }}}}", vars.join(" }} {{ "));
-                }
-                Ok(())
-            } else {
-                stubs::publish(kind.as_deref(), &generator::built_in_stub, force)
-            }
-        }
-        Commands::MakeModule { module, name, flags } => {
-            generator::make_module(&module, &name, flags.dry_run, flags.force)
-        }
         Commands::Configure { package, force, flags } => add::parse_flag_pairs(&flags)
             .and_then(|pairs| match codemods::configure_with_flags(&package, force, &pairs)? {
                 codemods::ConfigureOutcome::Configured => Ok(()),
@@ -647,5 +482,39 @@ mod help_tests {
         // path would print the same thing by a second route.
         assert!(!is_bare_help(&args(&[])));
         assert!(!is_bare_help(&args(&["list"])));
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    fn command_for(argv: &[&str]) -> Commands {
+        let mut full = vec!["ream"];
+        full.extend_from_slice(argv);
+        Cli::parse_from(full)
+            .command
+            .expect("a command was given, so one must parse")
+    }
+
+    #[test]
+    fn a_generator_is_the_applications_to_answer() {
+        // The `make:` commands live in `@c9up/ream`, not here: rendering a stub
+        // means evaluating `{{#if resourceful}}`, and there is one engine for
+        // that. What this binary owes them is the forward — which it does by
+        // not defining them, so clap hands the whole argv to the console.
+        for argv in [
+            vec!["make:controller", "billing", "Invoice"],
+            vec!["make:module", "billing", "Invoice", "--force"],
+            vec!["eject", "make/controller.stub"],
+        ] {
+            match command_for(&argv) {
+                Commands::External(forwarded) => {
+                    assert_eq!(forwarded, argv, "argv must reach the console intact");
+                }
+                _ => panic!("{argv:?} should have been forwarded to the console"),
+            }
+        }
     }
 }
