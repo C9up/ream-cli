@@ -6,11 +6,17 @@
 //! locations"). An app publishes the stubs it wants to change and edits them;
 //! everything else keeps using the defaults.
 //!
-//! One named deviation, forced by this generator being a Rust binary:
-//! **substitution, not a template engine.** Adonis renders stubs with tempura
-//! (`{{#var}}`, conditionals, partials); shipping that would mean shipping a JS
-//! runtime inside the CLI. Here a stub is plain text with `{{ variable }}`
-//! placeholders.
+//! **Two renderers, one grammar.** `@c9up/ream` carries the full engine —
+//! conditionals, loops, inline variables, custom blocks — and it compiles
+//! templates into JavaScript, which a Rust binary cannot evaluate without
+//! embedding a JS runtime. So the substitution below handles the common case
+//! (a stub with nothing but `{{ variable }}` placeholders, which is most of
+//! them) and anything carrying a BLOCK is handed to Node, where the real
+//! engine lives.
+//!
+//! That is the whole of the named deviation: not a second dialect, a second
+//! implementation of the cheap half. A stub that needs the expensive half pays
+//! for a Node boot; one that does not, does not.
 //!
 //! Everything else follows Adonis, including the part that matters most: **a
 //! stub chooses its own destination.** An Adonis stub opens with
@@ -77,6 +83,50 @@ pub fn read_override(kind: &str) -> Option<String> {
 /// Replace every `{{ name }}` placeholder. Unknown placeholders are left as
 /// they are: a typo stays visible in the generated file instead of silently
 /// becoming an empty string.
+/// Does this template need the real engine?
+///
+/// A block opens with `{{#`, a comment with `{{!`. Substitution handles
+/// neither, and rendering them as literal text would put `{{#if …}}` into
+/// someone's generated file.
+pub fn needs_engine(template: &str) -> bool {
+    template.contains("{{#") || template.contains("{{!")
+}
+
+/// Render through `@c9up/ream`, for a stub the substitution cannot do.
+///
+/// The package is resolved from the project being generated into, which is
+/// where it is installed. A project without it gets a message naming the
+/// missing dependency rather than a half-rendered file.
+pub fn render_with_engine(template: &str, vars: &BTreeMap<&str, String>) -> Result<String, String> {
+    let state: std::collections::BTreeMap<&str, &String> =
+        vars.iter().map(|(k, v)| (*k, v)).collect();
+    let payload = serde_json::json!({ "template": template, "state": state });
+
+    let script = "const { renderStub } = await import('@c9up/ream');          const input = JSON.parse(process.argv[1]);          process.stdout.write(renderStub(input.template, input.state));";
+
+    let output = std::process::Command::new("node")
+        .args([
+            "--import",
+            "@swc-node/register/esm-register",
+            "--input-type=module",
+            "-e",
+            script,
+            "--",
+            &payload.to_string(),
+        ])
+        .output()
+        .map_err(|e| format!("Failed to run the stub engine: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "This stub uses a block, which @c9up/ream renders — and it failed:\n{}",
+            stderr.trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 pub fn render(template: &str, vars: &BTreeMap<&str, String>) -> String {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
@@ -206,9 +256,19 @@ pub fn resolve(
                 .unwrap_or_default()
         )
     })?;
+    // A published stub may use the full grammar. The substitution below covers
+    // placeholders; anything with a block goes to the engine in `@c9up/ream`.
+    let render_part = |text: &str| -> Result<String, String> {
+        if needs_engine(text) {
+            render_with_engine(text, vars)
+        } else {
+            Ok(render(text, vars))
+        }
+    };
+
     let path = match front.to {
         Some(raw) => {
-            let rendered = render(&raw, vars);
+            let rendered = render_part(&raw)?;
             validate_destination(&rendered)?;
             rendered
         }
@@ -216,7 +276,7 @@ pub fn resolve(
     };
     Ok(Resolved {
         path,
-        content: render(&front.body, vars),
+        content: render_part(&front.body)?,
     })
 }
 
@@ -374,5 +434,26 @@ mod tests {
         assert!(validate_destination("/etc/passwd").is_err());
         assert!(validate_destination("").is_err());
         assert!(validate_destination("app/orders/X.ts").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod engine_routing_tests {
+    use super::*;
+
+    #[test]
+    fn a_placeholder_only_stub_stays_local() {
+        // Most stubs are this, and they must not pay for a Node boot.
+        assert!(!needs_engine("export class {{ className }} {}"));
+        assert!(!needs_engine("no tags at all"));
+    }
+
+    #[test]
+    fn a_block_or_a_comment_goes_to_the_engine() {
+        // Substituted locally, `{{#if x}}` would land in the generated file
+        // as literal text.
+        assert!(needs_engine("{{#if resourceful}}index(){{/if}}"));
+        assert!(needs_engine("{{#each methods as m}}{{ m }}{{/each}}"));
+        assert!(needs_engine("{{! a note }}body"));
     }
 }
