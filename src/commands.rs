@@ -342,6 +342,11 @@ pub fn run_dev(clear_screen: bool) -> Result<(), String> {
         // SAFETY: single-threaded here — nothing has spawned yet.
         unsafe { std::env::set_var("REAM_DEV_CLEAR_SCREEN", "false") };
     }
+    // Tells the application it was started by `ream dev`, which is what makes
+    // it print the ready sticker. Upstream's dev server prints that itself;
+    // ours cannot, because the port is the child's to know.
+    // SAFETY: same — nothing has spawned yet.
+    unsafe { std::env::set_var("REAM_DEV", "true") };
 
     if !std::path::Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
