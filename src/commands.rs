@@ -333,7 +333,16 @@ pub fn read_assets_config() -> Result<crate::dev::AssetsConfig, String> {
 }
 
 /// `ream dev` — the server, plus whatever the rc file says builds the assets.
-pub fn run_dev() -> Result<(), String> {
+pub fn run_dev(clear_screen: bool) -> Result<(), String> {
+    // The child clears the terminal before it restarts, the way `ace serve`
+    // does; `--no-clear` says not to. Passed as an environment variable
+    // because the flag belongs to this process and the decision belongs to
+    // the loader running inside node.
+    if !clear_screen {
+        // SAFETY: single-threaded here — nothing has spawned yet.
+        unsafe { std::env::set_var("REAM_DEV_CLEAR_SCREEN", "false") };
+    }
+
     if !std::path::Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }

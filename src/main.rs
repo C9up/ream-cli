@@ -87,7 +87,11 @@ enum Commands {
     },
 
     /// Start development server — hot-reloads through hot-hook when the project has it, otherwise node --watch
-    Dev,
+    Dev {
+        /// Keep the previous logs on screen after a change (`ace serve --no-clear`)
+        #[arg(long = "no-clear", action = clap::ArgAction::SetTrue)]
+        no_clear: bool,
+    },
 
     /// Start production server (spawns node)
     Start,
@@ -274,7 +278,7 @@ fn describe_arguments(sub: &clap::Command) -> (Vec<serde_json::Value>, Vec<serde
 /// where there is no app to ask.
 fn native_command_name(command: &Commands) -> Option<&'static str> {
     match command {
-        Commands::Dev => Some("dev"),
+        Commands::Dev { .. } => Some("dev"),
         Commands::Start => Some("start"),
         Commands::Build => Some("build"),
         Commands::Test { .. } => Some("test"),
@@ -384,7 +388,7 @@ fn main() {
             template::run(&name, destination.as_deref())
         }
         Commands::Add { package, dev, force, flags } => add::run(&package, dev, force, &flags),
-        Commands::Dev => commands::run_dev(),
+        Commands::Dev { no_clear } => commands::run_dev(!no_clear),
         Commands::Start => commands::run_start(),
         Commands::Build => commands::run_build(),
         Commands::Test {
