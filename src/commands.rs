@@ -434,6 +434,17 @@ pub fn run_build() -> Result<(), String> {
     // to read at all, so `assets` and `metaFiles` come back together.
     let rc = read_rc()?;
 
+    // Emptied BEFORE anything writes into it, as upstream's bundler does:
+    // `tsc` overwrites what it emits but never removes what it no longer
+    // emits, so a renamed or deleted module left its old `.js` behind and
+    // Node went on importing it — a build that was half the previous one.
+    // Before the assets step too, so a pipeline writing into the output is
+    // not erased a moment after it ran.
+    let out = build_output_dir();
+    if let Some(dir) = out.as_deref() {
+        empty_build_output(dir)?;
+    }
+
     if let Some(build) = rc.assets.build {
         let args: Vec<&str> = build.args.iter().map(String::as_str).collect();
         let status = inherited_status(&build.command, &args)?;
@@ -446,8 +457,82 @@ pub fn run_build() -> Result<(), String> {
         }
     }
 
-    spawn_node("npx", &["tsc"])?;
-    make_output_self_contained(&rc.meta_file_patterns)
+    if let Err(failure) = spawn_node("npx", &["tsc"]) {
+        // A build that stopped on a type error leaves whatever `tsc` had
+        // already emitted, and nothing copies the manifest in afterwards. That
+        // directory is startable-looking and not startable; upstream removes
+        // it for the same reason. Best-effort: the compile error is the news,
+        // and failing to tidy up must not replace it.
+        if let Some(dir) = out.as_deref() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        return Err(failure);
+    }
+
+    make_output_self_contained(out.as_deref(), &rc.meta_file_patterns)
+}
+
+/// Where `tsc` will write, resolved the way `tsc` itself resolves it.
+///
+/// Asked of the compiler rather than parsed out of `tsconfig.json`: a project's
+/// config `extends` a base — ours does, and that base is where `outDir` lives,
+/// as `${configDir}/dist` — so a hand-rolled reader finds nothing in the file
+/// it was pointed at. It would then fall back to a guess, and a guess is not
+/// something to delete a directory on.
+///
+/// `None` when the answer cannot be had: a config with no `outDir`, a `tsc`
+/// that would not run, an answer pointing outside the project. Nothing is
+/// removed in that case — the build still runs, it just keeps whatever was
+/// there, which is what it did before this existed.
+fn build_output_dir() -> Option<std::path::PathBuf> {
+    let output = Command::new("npx")
+        .args(["tsc", "--showConfig"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    removable_out_dir(value.get("compilerOptions")?.get("outDir")?.as_str()?)
+}
+
+/// The `outDir` as a path this may delete, or `None`.
+///
+/// Relative to the project, and not the project itself. An absolute path, a
+/// `..` climbing out, or an `outDir` of `.` all name something this has no
+/// business emptying — and an `outDir` is a string from a file, so the check
+/// belongs here rather than in the reader's head.
+fn removable_out_dir(raw: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(raw);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+    {
+        return None;
+    }
+    let normalised: std::path::PathBuf = path
+        .components()
+        .filter(|c| *c != std::path::Component::CurDir)
+        .collect();
+    if normalised.as_os_str().is_empty() {
+        return None;
+    }
+    Some(normalised)
+}
+
+/// Remove the output directory, if it is there.
+///
+/// Removed rather than walked and pruned: the whole point is that what is in
+/// there is the previous build, and there is nothing in it worth keeping that
+/// this build will not put back.
+fn empty_build_output(dir: &std::path::Path) -> Result<(), String> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(dir)
+        .map_err(|e| format!("Could not empty {} before building: {e}", dir.display()))
 }
 
 /// Does `path` satisfy `pattern`?
@@ -611,8 +696,13 @@ const BUILD_META_FILES: &[&str] = &[
 ///
 /// This is AdonisJS's shape — its `Bundler` declares the manifest and lockfile
 /// per package manager and copies them into the build output.
-fn make_output_self_contained(meta_file_patterns: &[String]) -> Result<(), String> {
-    let out = std::path::Path::new("dist");
+fn make_output_self_contained(
+    out_dir: Option<&std::path::Path>,
+    meta_file_patterns: &[String],
+) -> Result<(), String> {
+    // `dist` when the compiler could not be asked, which is what every other
+    // command here assumes — `ream start` runs `dist/bin/server.js`.
+    let out = out_dir.unwrap_or_else(|| std::path::Path::new("dist"));
     if !out.is_dir() {
         // `tsc` emitted nothing, which it reports itself; saying it twice helps
         // nobody.
@@ -624,7 +714,7 @@ fn make_output_self_contained(meta_file_patterns: &[String]) -> Result<(), Strin
             continue;
         }
         std::fs::copy(source, out.join(name))
-            .map_err(|e| format!("Could not copy {name} into dist/: {e}"))?;
+            .map_err(|e| format!("Could not copy {name} into {}/: {e}", out.display()))?;
     }
     // And whatever the application declared as its own non-module files.
     copy_meta_files(out, meta_file_patterns)
@@ -2407,5 +2497,71 @@ mod meta_file_tests {
         let path = root.join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, contents).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod build_output_tests {
+    use super::{empty_build_output, removable_out_dir};
+
+    /// The whole point of the guard: this function's answer is deleted.
+    #[test]
+    fn refuses_anything_it_has_no_business_deleting() {
+        // The project root itself.
+        assert_eq!(removable_out_dir("."), None);
+        assert_eq!(removable_out_dir("./"), None);
+        assert_eq!(removable_out_dir(""), None);
+        // Out of the project, by climbing or by address.
+        assert_eq!(removable_out_dir(".."), None);
+        assert_eq!(removable_out_dir("../build"), None);
+        assert_eq!(removable_out_dir("dist/../.."), None);
+        assert_eq!(removable_out_dir("/tmp/build"), None);
+    }
+
+    #[test]
+    fn accepts_a_directory_under_the_project() {
+        assert_eq!(
+            removable_out_dir("./dist"),
+            Some(std::path::PathBuf::from("dist"))
+        );
+        assert_eq!(
+            removable_out_dir("build/server"),
+            Some(std::path::PathBuf::from("build/server"))
+        );
+    }
+
+    #[test]
+    fn empties_what_a_previous_build_left() {
+        let dir = tempdir();
+        let out = dir.join("dist");
+        std::fs::create_dir_all(out.join("app")).unwrap();
+        // The file a renamed module leaves behind, which `tsc` would not touch
+        // and Node would happily import.
+        std::fs::write(out.join("app/OldController.js"), "export {}").unwrap();
+
+        empty_build_output(&out).unwrap();
+
+        assert!(!out.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_first_build_has_nothing_to_empty() {
+        let dir = tempdir();
+        assert!(empty_build_output(&dir.join("dist")).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn tempdir() -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "ream-build-out-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        base
     }
 }
