@@ -161,8 +161,7 @@ fn server_entry_at(root: &std::path::Path) -> &'static str {
 fn dependency_served_as_typescript() -> Option<String> {
     let manifest = std::fs::read_to_string("node_modules/@c9up/ream/package.json").ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&manifest).ok()?;
-    let exports = parsed.get("exports")?.to_string();
-    if !exports.contains(".ts\"") {
+    if !exports_serve_typescript(parsed.get("exports")?) {
         return None;
     }
     Some(
@@ -175,6 +174,19 @@ fn dependency_served_as_typescript() -> Option<String> {
         ]
         .join("\n  "),
     )
+}
+
+/// Whether an `exports` map sends an import to a TypeScript source.
+///
+/// A declaration file is not one: every compiled package names its `.d.ts`
+/// under `types`, and counting those refused every registry install.
+fn exports_serve_typescript(exports: &serde_json::Value) -> bool {
+    match exports {
+        serde_json::Value::String(target) => target.ends_with(".ts") && !target.ends_with(".d.ts"),
+        serde_json::Value::Array(targets) => targets.iter().any(exports_serve_typescript),
+        serde_json::Value::Object(conditions) => conditions.values().any(exports_serve_typescript),
+        _ => false,
+    }
 }
 
 pub fn spawn_node(cmd: &str, args: &[&str]) -> Result<(), String> {
@@ -2439,6 +2451,20 @@ mod tests {
             ]
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_registry_install_is_not_typescript_for_its_declaration_files() {
+        let published = serde_json::json!({
+            ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+            "./env": { "types": "./dist/env/loadEnvFiles.d.ts", "import": "./dist/env/loadEnvFiles.js" },
+        });
+        assert!(!exports_serve_typescript(&published));
+
+        let workspace = serde_json::json!({
+            ".": { "types": "./src/index.ts", "import": "./src/index.ts" },
+        });
+        assert!(exports_serve_typescript(&workspace));
     }
 
     #[test]
