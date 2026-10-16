@@ -128,7 +128,31 @@ pub fn run_start() -> Result<(), String> {
         // and that trace says nothing about why.
         return Err(reason);
     }
-    spawn_node("node", &[server_entry_at(std::path::Path::new("."))])
+    become_node(server_entry_at(std::path::Path::new(".")))
+}
+
+/// Become `node <entry>` instead of waiting on it.
+///
+/// `start` is what a container runs as its first process, and a parent left in
+/// between holds the signals: `docker stop` sends SIGTERM to PID 1, which drops
+/// any signal it has no handler for. The server never heard it, closed nothing,
+/// and was killed by SIGKILL once the stop timeout ran out. Replaced by node,
+/// nothing stands in between — the signals and the exit code are the server's.
+#[cfg(unix)]
+fn become_node(entry: &str) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    if !std::path::Path::new("package.json").exists() {
+        return Err("Not in a Ream project (no package.json found)".to_string());
+    }
+    // `exec` only returns when it failed.
+    let err = Command::new("node").arg(entry).exec();
+    Err(format!("Failed to run 'node': {err}"))
+}
+
+/// Windows has no `exec`: the server runs as a child, as it always has there.
+#[cfg(not(unix))]
+fn become_node(entry: &str) -> Result<(), String> {
+    spawn_node("node", &[entry])
 }
 
 /// The server entry `start` runs, relative to `root`.
