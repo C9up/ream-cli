@@ -128,7 +128,22 @@ pub fn run_start() -> Result<(), String> {
         // and that trace says nothing about why.
         return Err(reason);
     }
-    spawn_node("node", &["dist/bin/server.js"])
+    spawn_node("node", &[server_entry_at(std::path::Path::new("."))])
+}
+
+/// The server entry `start` runs, relative to `root`.
+///
+/// `dist/bin/server.js` from a project. From the build output itself — which
+/// `ream build` makes an application root of its own, manifest included, so a
+/// deployment can ship that folder alone — it is the `bin/server.js` sitting
+/// right there: a project's `bin/` holds TypeScript, so a compiled server entry
+/// in it says this directory is the built one.
+fn server_entry_at(root: &std::path::Path) -> &'static str {
+    if root.join("bin/server.js").is_file() {
+        "bin/server.js"
+    } else {
+        "dist/bin/server.js"
+    }
 }
 
 /// Whether a linked dependency answers with TypeScript rather than JavaScript.
@@ -1082,44 +1097,28 @@ fn scan_for(dir: &std::path::Path, needles: &[String]) -> bool {
 /// Dispatch a command to the app's console kernel — the app's own console kernel
 /// equivalent, and the reason this binary accepts names it does not define.
 ///
-/// Prefers the app's `bin/console.ts` entry when it exists: an app may wire a
-/// custom importer, path aliases or preloads there, and re-implementing that
-/// here would drift. Falls back to an inline boot for projects scaffolded
-/// before the entry existed, so `ream <cmd>` works without touching the app.
+/// Goes through the app's own console entry — `bin/console.ts`, or the compiled
+/// `bin/console.js` in a built application — and falls back to an inline boot
+/// for projects scaffolded before the entry existed, so `ream <cmd>` works
+/// without touching the app. `console_entry_at` says which.
 pub fn run_console(argv: &[String]) -> Result<(), String> {
     if !std::path::Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
-    require_ts_loader()?;
-
-    let status = if std::path::Path::new("bin/console.ts").exists() {
-        let mut args: Vec<&str> = vec![
-            "--import",
-            "@swc-node/register/esm-register",
-            "bin/console.ts",
-        ];
-        args.extend(argv.iter().map(String::as_str));
-        inherited_status("node", &args)?
-    } else {
-        if !std::path::Path::new("reamrc.ts").exists() {
-            return Err(
-                "No bin/console.ts and no reamrc.ts — cannot reach the app's console kernel.\n  \
-                 Run 'ream new' for a project with a console entry, or add bin/console.ts."
-                    .to_string(),
-            );
-        }
-        let script = console_script(argv);
-        inherited_status(
-            "node",
-            &[
-                "--import",
-                "@swc-node/register/esm-register",
-                "--input-type=module",
-                "-e",
-                &script,
-            ],
-        )?
+    let Some(entry) = console_entry_at(std::path::Path::new(".")) else {
+        return Err(
+            "No bin/console.ts, no bin/console.js and no reamrc.ts — cannot reach the app's console kernel.\n  \
+             Run 'ream new' for a project with a console entry, or add bin/console.ts."
+                .to_string(),
+        );
     };
+    if !matches!(entry, ConsoleEntry::Compiled) {
+        require_ts_loader()?;
+    }
+
+    let args = console_node_args(&entry, argv);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let status = inherited_status("node", &args)?;
 
     if !status.success() {
         // The kernel already reported what went wrong; propagate its code
@@ -1128,6 +1127,61 @@ pub fn run_console(argv: &[String]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// How the app's console kernel is reached from a directory.
+enum ConsoleEntry {
+    /// The app's `bin/console.ts`, through the TypeScript loader.
+    Source,
+    /// The `bin/console.js` of a built application, run by plain node.
+    ///
+    /// `ream build` makes its output an application root of its own, and that
+    /// root has no TypeScript to load: a production install carries no loader,
+    /// and `ream migration:run` in the deployed folder must not need one.
+    /// AdonisJS's bundler does the same for its build folder — the `ace.js` it
+    /// writes there imports `./bin/console.js` with nothing in front.
+    Compiled,
+    /// An inline boot from `reamrc.ts`, for projects scaffolded before the entry
+    /// existed.
+    Inline,
+}
+
+/// The console entry `root` offers, preferring the app's own: an app may wire a
+/// custom importer, path aliases or preloads in `bin/console.ts`, and
+/// re-implementing that here would drift.
+fn console_entry_at(root: &std::path::Path) -> Option<ConsoleEntry> {
+    if root.join("bin/console.ts").exists() {
+        Some(ConsoleEntry::Source)
+    } else if root.join("bin/console.js").is_file() {
+        Some(ConsoleEntry::Compiled)
+    } else if root.join("reamrc.ts").exists() {
+        Some(ConsoleEntry::Inline)
+    } else {
+        None
+    }
+}
+
+/// The node arguments that hand `argv` to the console kernel through `entry`.
+fn console_node_args(entry: &ConsoleEntry, argv: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = match entry {
+        ConsoleEntry::Source => vec![
+            "--import".to_string(),
+            "@swc-node/register/esm-register".to_string(),
+            "bin/console.ts".to_string(),
+        ],
+        ConsoleEntry::Compiled => vec!["bin/console.js".to_string()],
+        ConsoleEntry::Inline => {
+            return vec![
+                "--import".to_string(),
+                "@swc-node/register/esm-register".to_string(),
+                "--input-type=module".to_string(),
+                "-e".to_string(),
+                console_script(argv),
+            ];
+        }
+    };
+    args.extend(argv.iter().cloned());
+    args
 }
 
 /// The inline console boot, used when the app has no `bin/console.ts`.
@@ -1333,31 +1387,14 @@ fn group_of(name: &str) -> String {
 /// a command missing because of a broken import looks like a command that was
 /// never written.
 fn app_commands() -> Vec<ListEntry> {
-    let output = if std::path::Path::new("bin/console.ts").exists() {
-        Command::new("node")
-            .args([
-                "--import",
-                "@swc-node/register/esm-register",
-                "bin/console.ts",
-                "list",
-                "--json",
-            ])
-            .stderr(Stdio::piped())
-            .output()
-    } else if std::path::Path::new("reamrc.ts").exists() {
-        Command::new("node")
-            .args([
-                "--import",
-                "@swc-node/register/esm-register",
-                "--input-type=module",
-                "-e",
-                &console_script(&["list".to_string(), "--json".to_string()]),
-            ])
-            .stderr(Stdio::piped())
-            .output()
-    } else {
+    let Some(entry) = console_entry_at(std::path::Path::new(".")) else {
         return Vec::new();
     };
+    let args = console_node_args(&entry, &["list".to_string(), "--json".to_string()]);
+    let output = Command::new("node")
+        .args(&args)
+        .stderr(Stdio::piped())
+        .output();
 
     let output = match output {
         Ok(output) => output,
@@ -2359,12 +2396,65 @@ mod tests {
         // The pattern carries its leading indentation and trailing semicolon so
         // this assertion does not count the literal on this very line — the file
         // is read back through include_str!.
+        // The console dispatch is not among them: it guards only when it goes
+        // through TypeScript, since a built application has no loader to find.
         let calls = source.matches("\n    require_ts_loader()?;").count();
         assert_eq!(
-            calls, 6,
-            "expected the 6 app-booting commands to guard on the TypeScript loader; \
+            calls, 5,
+            "expected the 5 app-booting commands to guard on the TypeScript loader; \
              if you added or removed one, update this count deliberately"
         );
+    }
+
+    #[test]
+    fn a_built_application_reaches_its_console_without_the_loader() {
+        let dir = loader_fixture("built-console");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/console.js"), "").unwrap();
+        std::fs::write(dir.join("reamrc.js"), "").unwrap();
+
+        let entry = console_entry_at(&dir).expect("a console entry");
+        assert!(matches!(entry, ConsoleEntry::Compiled));
+        let args = console_node_args(&entry, &["db:seed".to_string(), "--force".to_string()]);
+        assert_eq!(args, ["bin/console.js", "db:seed", "--force"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_project_keeps_its_typescript_console_entry() {
+        let dir = loader_fixture("source-console");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/console.ts"), "").unwrap();
+
+        let entry = console_entry_at(&dir).expect("a console entry");
+        assert!(matches!(entry, ConsoleEntry::Source));
+        let args = console_node_args(&entry, &["migration:status".to_string()]);
+        assert_eq!(
+            args,
+            [
+                "--import",
+                "@swc-node/register/esm-register",
+                "bin/console.ts",
+                "migration:status"
+            ]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn start_runs_the_server_of_the_directory_it_stands_in_when_that_is_the_build() {
+        let project = loader_fixture("start-project");
+        std::fs::create_dir_all(project.join("bin")).unwrap();
+        std::fs::write(project.join("bin/server.ts"), "").unwrap();
+        assert_eq!(server_entry_at(&project), "dist/bin/server.js");
+
+        let built = loader_fixture("start-built");
+        std::fs::create_dir_all(built.join("bin")).unwrap();
+        std::fs::write(built.join("bin/server.js"), "").unwrap();
+        assert_eq!(server_entry_at(&built), "bin/server.js");
+
+        std::fs::remove_dir_all(&project).unwrap();
+        std::fs::remove_dir_all(&built).unwrap();
     }
 }
 
