@@ -298,7 +298,11 @@ jobs:
           mkdir -p npm/ream-cli/bin
           cat > npm/ream-cli/bin/ream << 'BINEOF'
           #!/usr/bin/env node
-          const { execFileSync } = require('child_process');
+          // Spawned rather than run synchronously, so that signals reach the binary. In a
+          // container this script is PID 1 and `docker stop` sends SIGTERM here: blocked
+          // in execFileSync it passed nothing on, the server never shut down, and the
+          // stop ended in SIGKILL.
+          const { spawn } = require('child_process');
           const path = require('path');
           const os = require('os');
           const platformMap = {
@@ -312,8 +316,18 @@ jobs:
           if (!pkg) { console.error(`Unsupported platform: ${os.platform()}-${os.arch()}`); process.exit(1); }
           const bin = os.platform() === 'win32' ? 'ream.exe' : 'ream';
           const binPath = path.join(require.resolve(`${pkg}/package.json`), '..', bin);
-          try { execFileSync(binPath, process.argv.slice(2), { stdio: 'inherit' }); }
-          catch (e) { process.exit(e.status || 1); }
+          const child = spawn(binPath, process.argv.slice(2), { stdio: 'inherit' });
+          // Ctrl-C reaches the whole process group, the binary included: passing SIGINT
+          // on would deliver it twice. Listening keeps this script alive until the
+          // binary has finished stopping.
+          process.on('SIGINT', () => {});
+          for (const signal of ['SIGTERM', 'SIGHUP']) {
+            process.on(signal, () => child.kill(signal));
+          }
+          child.on('error', (e) => { console.error(e.message); process.exit(1); });
+          child.on('exit', (code, signal) => {
+            process.exit(signal ? 128 + os.constants.signals[signal] : code);
+          });
           BINEOF
           chmod +x npm/ream-cli/bin/ream
           cp README.md npm/ream-cli/README.md
