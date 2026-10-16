@@ -322,6 +322,14 @@ fn is_bare_help(args: &[String]) -> bool {
 }
 
 fn main() {
+    // Rust ignores SIGPIPE, so a reader that stops early (`ream info | head -1`)
+    // turns the next print into a panic. Restoring the default ends the process
+    // quietly instead, as any other command-line tool does.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     // Before `Cli::parse()`, which would answer `--help` itself and exit.
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if is_bare_help(&argv) {

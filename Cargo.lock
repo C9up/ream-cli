@@ -267,6 +267,7 @@ version = "0.3.16"
 dependencies = [
  "clap",
  "dialoguer",
+ "libc",
  "serde_json",
  "wait-timeout",
 ]
