@@ -50,6 +50,12 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test -p ream-cli
+      # `ream new` end to end: scaffold, install from the registry, run the
+      # project's own suites. pnpm 11+ because that is the line that refuses an
+      # unapproved build script — the failure this test exists to catch.
+      - uses: pnpm/action-setup@v6
+        with: { version: 12 }
+      - run: cargo test -p ream-cli --test new_test -- --ignored
       - run: cargo build --release -p ream-cli
 
   gates:

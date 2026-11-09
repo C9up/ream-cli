@@ -82,6 +82,7 @@ pub fn run(name: &str, options: &NewOptions<'_>) -> Result<(), String> {
         write_file(root, "start/env.ts", &start_env(database))?;
     }
     write_file(root, ".gitignore", GITIGNORE)?;
+    write_file(root, "pnpm-workspace.yaml", PNPM_WORKSPACE)?;
     write_file(root, "reamrc.ts", &reamrc(template))?;
     // Console entry. The microservice template runs a standalone bin/server.ts
     // with no Ignitor or rc file, so it has no console kernel to reach.
@@ -108,9 +109,23 @@ pub fn run(name: &str, options: &NewOptions<'_>) -> Result<(), String> {
         .stderr(std::process::Stdio::inherit())
         .status();
 
+    // A project whose dependencies did not install is not a project that is
+    // ready, so this is the command failing — not a warning followed by
+    // "Done!" and an exit code of 0 that a script would read as success.
     match status {
         Ok(s) if s.success() => {}
-        _ => println!("  \x1b[33mWarning: pnpm install failed — run it manually\x1b[0m\n"),
+        Ok(s) => {
+            return Err(format!(
+                "pnpm install failed ({}) — '{}' was written but its dependencies are not installed. Fix the error above, then run `pnpm install` in it.",
+                s, name
+            ))
+        }
+        Err(e) => {
+            return Err(format!(
+                "Could not run pnpm ({}) — '{}' was written but its dependencies are not installed. Install pnpm, then run `pnpm install` in it.",
+                e, name
+            ))
+        }
     }
 
     println!("\n  \x1b[32mDone!\x1b[0m Next steps:\n");
@@ -274,6 +289,12 @@ const DEV_DEPS: &[(&str, &str)] = &[
     ("typescript", "^5.7"),
 ];
 
+/// The version of this CLI, which a scaffolded app declares as its own
+/// `@c9up/ream-cli`. It is the binary's own version rather than an entry in the
+/// tables above: the npm package and this binary are published together, so
+/// the version that wrote the project is always one the registry has.
+const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Plus the bridge, for a template whose app the suites boot.
 const APP_DEV_DEPS: &[(&str, &str)] = &[("@c9up/helix-plugin-ream", "^0.1.6")];
 
@@ -288,6 +309,11 @@ fn package_json(name: &str, template: &str) -> String {
     }
 
     let mut dev_deps: Vec<String> = DEV_DEPS.iter().map(quoted).collect();
+    // The scripts below call `ream`, so the project carries the CLI that wrote
+    // it. Without it they lean on a global binary a CI runner does not have,
+    // and `npx ream` fetches an unrelated npm package called `ream`.
+    let cli_range = format!("^{CLI_VERSION}");
+    dev_deps.push(quoted(&("@c9up/ream-cli", cli_range.as_str())));
     if boots_its_app(template) {
         dev_deps.extend(APP_DEV_DEPS.iter().map(quoted));
     }
@@ -320,7 +346,7 @@ fn package_json(name: &str, template: &str) -> String {
 
     let imports = "    \"#app/WILDCARD\": \"./app/WILDCARD\",\n    \"#middleware/WILDCARD\": \"./app/middleware/WILDCARD\",\n    \"#config/WILDCARD\": \"./config/WILDCARD\",\n    \"#providers/WILDCARD\": \"./providers/WILDCARD\",\n    \"#start/WILDCARD\": \"./start/WILDCARD\"".replace("WILDCARD", "*");
 
-    format!("{{\n  \"name\": \"{}\",\n  \"version\": \"0.1.7\",\n  \"private\": true,\n  \"type\": \"module\",{}\n  \"imports\": {{\n{}\n  }},\n  \"scripts\": {{\n    \"dev\": \"ream dev\",\n    \"build\": \"ream build\",\n    \"start\": \"ream start\",\n    \"test\": \"{}\"\n  }},\n  \"dependencies\": {{\n    {}\n  }},\n  \"devDependencies\": {{\n    {}\n  }},\n  \"engines\": {{\n    \"node\": \">=24.0.0\"\n  }}\n}}", name, boundaries, imports, test_script, deps.join(",\n    "), dev_deps.join(",\n    "))
+    format!("{{\n  \"name\": \"{}\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"type\": \"module\",{}\n  \"imports\": {{\n{}\n  }},\n  \"scripts\": {{\n    \"dev\": \"ream dev\",\n    \"build\": \"ream build\",\n    \"start\": \"ream start\",\n    \"test\": \"{}\"\n  }},\n  \"dependencies\": {{\n    {}\n  }},\n  \"devDependencies\": {{\n    {}\n  }},\n  \"engines\": {{\n    \"node\": \">=24.0.0\"\n  }}\n}}", name, boundaries, imports, test_script, deps.join(",\n    "), dev_deps.join(",\n    "))
 }
 
 /// Does this template start the application from the rc file?
@@ -405,7 +431,14 @@ const TESTS_BLOCK: &str = "  tests: {\n    suites: [\n      { name: 'unit', file
 /// time, so a unit test file boots nothing. `start()` hands back its own
 /// teardown, which is why the hook is one line and there is no matching
 /// `teardown` to forget.
-const TEST_BOOTSTRAP: &str = r##"import { configure } from '@c9up/helix'
+///
+/// The module EXPORTS `plugins`, `runnerHooks` and `configureSuite`; it never
+/// calls `configure()` itself. helix imports it and calls `configure()` with
+/// those exports and the name of the suite being run. A `configure()` written
+/// in the file ran at import time with no suite at all, so the hook only ever
+/// saw `default`, `functional` never started its server, and a fresh project
+/// failed its own first test.
+const TEST_BOOTSTRAP: &str = r##"import type { ConfigureOptions, Plugin, RunnerHook } from '@c9up/helix'
 import { apiClient } from '@c9up/helix-plugin-ream'
 import { Ignitor } from '@c9up/ream'
 import { createHyperServerFactory } from '@c9up/ream/bootstrap'
@@ -431,16 +464,29 @@ export const testUtils = createTestUtils(async (port) => {
   return { port: await ignitor.port(), close: () => ignitor.stop() }
 })
 
-await configure({
-  plugins: [apiClient({ testUtils })],
-  configureSuite(suite) {
-    // No `return`: the hook's contract is void, and returning the handle makes
-    // a fresh project fail typechecking.
-    if (suite.name === 'functional') {
-      suite.setup(() => testUtils.httpServer().start())
-    }
-  },
-})
+/**
+ * The plugins every suite gets. helix reads this export, along with
+ * `runnerHooks` and `configureSuite` below: this file never calls
+ * `configure()` itself.
+ */
+export const plugins: Plugin[] = [apiClient({ testUtils })]
+
+/**
+ * Run once for the whole run, before and after every suite.
+ */
+export const runnerHooks: { setup: RunnerHook[]; teardown: RunnerHook[] } = {
+  setup: [],
+  teardown: [],
+}
+
+/**
+ * Tap into each suite as it starts. Only `functional` pays for a server.
+ */
+export const configureSuite: ConfigureOptions['configureSuite'] = (suite) => {
+  if (suite.name === 'functional') {
+    return suite.setup(() => testUtils.httpServer().start())
+  }
+}
 "##;
 
 /// A first test, so `ream test` answers on a fresh project.
@@ -649,6 +695,20 @@ fn write_microservice_template(root: &Path, name: &str) -> Result<(), String> {
 
 const GITIGNORE: &str = "node_modules/\ndist/\n.env\n*.sqlite\ndata/\n";
 
+/// The dependencies whose install scripts a scaffolded app approves.
+///
+/// pnpm refuses to install (ERR_PNPM_IGNORED_BUILDS) while a dependency's
+/// build script is neither approved nor denied, and it writes a placeholder
+/// into this file for someone to fill in. `@swc/core` is the one every
+/// template reaches, through `@swc-node/register`: it downloads the native
+/// compiler `ream dev` and `ream test` load the app with.
+///
+/// From pnpm 11 these settings are read ONLY from `pnpm-workspace.yaml`, never
+/// from `package.json`. `allowBuilds` is the pnpm 11+ key, and
+/// `onlyBuiltDependencies` the same approval for pnpm 10.
+const PNPM_WORKSPACE: &str =
+    "allowBuilds:\n  '@swc/core': true\nonlyBuiltDependencies:\n  - '@swc/core'\n";
+
 /// Reject an unknown flag value, naming what was allowed — rather than
 /// scaffolding something the user did not ask for.
 pub fn validate(flag: &str, allowed: &[&str], given: Option<&str>) -> Result<(), String> {
@@ -816,6 +876,27 @@ mod tests {
     /// `design:paramtypes`, so an entry run through it gets a container where
     /// every injected dependency is `undefined`. And `scripts.test` said
     /// `vitest run` while the framework's own command is `ream test`.
+    /// A new project starts at 0.1.0, and its `ream` scripts resolve the CLI
+    /// from its own dependencies — not a global binary a CI runner lacks, nor
+    /// the unrelated npm package `npx ream` fetches.
+    #[test]
+    fn a_new_project_starts_at_0_1_0_and_carries_its_cli() {
+        for template in ["api", "web", "slim", "microservice"] {
+            let manifest = package_json("demo", template);
+            assert!(
+                manifest.contains("\"version\": \"0.1.0\""),
+                "{template}: {manifest}"
+            );
+            let parsed: serde_json::Value = serde_json::from_str(&manifest)
+                .unwrap_or_else(|e| panic!("{template}: invalid JSON ({e}):\n{manifest}"));
+            assert_eq!(
+                parsed["devDependencies"]["@c9up/ream-cli"],
+                format!("^{}", env!("CARGO_PKG_VERSION")),
+                "{template}: {manifest}"
+            );
+        }
+    }
+
     #[test]
     fn a_scaffolded_app_tests_with_the_runner_the_framework_drives() {
         let manifest = package_json("demo", "api");
@@ -848,8 +929,28 @@ mod tests {
         let root = unique_root("suites");
         write_api_template(&root, "demo").unwrap();
         let bootstrap = fs::read_to_string(root.join("tests/bootstrap.ts")).unwrap();
+        // helix imports this module and calls `configure()` itself, with the
+        // suite's name. A `configure()` in the file runs at import time against
+        // a suite named `default`, so `functional` never starts its server.
+        for export in [
+            "export const plugins",
+            "export const runnerHooks",
+            "export const configureSuite",
+        ] {
+            assert!(
+                bootstrap.contains(export),
+                "missing `{export}` — got:\n{bootstrap}"
+            );
+        }
+        assert!(
+            !bootstrap.contains("configure({") && !bootstrap.contains("import { configure"),
+            "the bootstrap must export its hooks, not call configure() — got:\n{bootstrap}"
+        );
         // Only `functional` pays for a server: a unit test file boots nothing.
-        assert!(bootstrap.contains("configureSuite"), "{bootstrap}");
+        assert!(
+            bootstrap.contains("suite.name === 'functional'"),
+            "{bootstrap}"
+        );
         assert!(
             bootstrap.contains("testUtils.httpServer().start()"),
             "{bootstrap}"
