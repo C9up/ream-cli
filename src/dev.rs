@@ -17,7 +17,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -411,7 +411,7 @@ pub fn run_together(processes: Vec<Process>, watch_dirs: &[&str]) -> Result<(), 
 /// pumps included: a replacement whose streams are not pumped is a server whose
 /// output silently stops after the first hot reload.
 fn spawn_piped(spec: &CommandSpec, prefix: &str) -> Result<Child, String> {
-    let mut child = Command::new(&spec.command)
+    let mut child = crate::tools::command(&spec.command)
         .args(&spec.args)
         .env("FORCE_COLOR", "1")
         .stdout(Stdio::piped())

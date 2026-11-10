@@ -58,6 +58,20 @@ jobs:
       - run: cargo test -p ream-cli --test new_test -- --ignored
       - run: cargo build --release -p ream-cli
 
+  # win32-x64 is a published target, and the package managers there are `.cmd`
+  # shims that Rust's `Command` does not find on its own. Scoped to the program
+  # resolution and to `ream new` starting pnpm through it.
+  check-windows:
+    name: Windows program resolution
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p ream-cli --bin ream tools::
+      - run: cargo test -p ream-cli --test new_test
+
   gates:
     name: Publish gates (tag + drift)
     # Releases are manual. `build` and `publish` need this job, so they skip

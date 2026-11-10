@@ -12,6 +12,7 @@ mod envfile;
 mod mcp;
 mod scaffold;
 mod template;
+mod tools;
 mod ui;
 
 use clap::{Parser, Subcommand};

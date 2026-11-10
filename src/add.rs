@@ -11,7 +11,7 @@
 //! integration tests hermetic without touching the npm registry.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::codemods;
 
@@ -364,7 +364,7 @@ pub fn run(spec: &str, dev: bool, force: bool, flags: &[String]) -> Result<(), S
             .map_err(|e| format!("Failed to write dry-run log: {}", e))?;
     } else {
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let status = Command::new(pm.binary())
+        let status = crate::tools::command(pm.binary())
             .args(&arg_refs)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())

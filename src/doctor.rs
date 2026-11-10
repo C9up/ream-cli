@@ -132,7 +132,7 @@ fn check_node_version() -> Check {
 /// the number goes. The same gap was closed for Node after an audit; the two
 /// checks sit three lines apart and only one of them was corrected.
 fn check_pnpm() -> Check {
-    let output = Command::new("pnpm").arg("--version").output();
+    let output = crate::tools::command("pnpm").arg("--version").output();
     let reported = output
         .as_ref()
         .ok()

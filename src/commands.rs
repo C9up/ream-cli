@@ -39,7 +39,9 @@ pub fn require_ts_loader_at(root: &std::path::Path) -> Result<(), String> {
 }
 
 fn inherited_status(cmd: &str, args: &[&str]) -> Result<ExitStatus, String> {
-    Command::new(cmd)
+    // Through the resolver: an assets command such as `pnpm` or `vite` is a
+    // `.cmd` shim on Windows.
+    crate::tools::command(cmd)
         .args(args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -213,6 +215,8 @@ fn exports_serve_typescript(exports: &serde_json::Value) -> bool {
     }
 }
 
+/// Only Windows still needs it: elsewhere `start` replaces this process.
+#[cfg(not(unix))]
 pub fn spawn_node(cmd: &str, args: &[&str]) -> Result<(), String> {
     // Check we're in a Ream project
     if !std::path::Path::new("package.json").exists() {
@@ -481,6 +485,12 @@ pub fn run_build() -> Result<(), String> {
     }
     require_ts_loader()?;
 
+    // The compiler is found before anything is touched: without one the build
+    // cannot finish, and the previous output must still be there afterwards.
+    let root =
+        std::env::current_dir().map_err(|e| format!("Could not resolve the project root: {e}"))?;
+    crate::tools::tsc(&root)?;
+
     // One read, both slices: the rc file is TypeScript and costs a Node process
     // to read at all, so `assets` and `metaFiles` come back together.
     let rc = read_rc()?;
@@ -491,7 +501,7 @@ pub fn run_build() -> Result<(), String> {
     // Node went on importing it — a build that was half the previous one.
     // Before the assets step too, so a pipeline writing into the output is
     // not erased a moment after it ran.
-    let out = build_output_dir();
+    let out = build_output_dir(&root);
     if let Some(dir) = out.as_deref() {
         empty_build_output(dir)?;
     }
@@ -508,7 +518,7 @@ pub fn run_build() -> Result<(), String> {
         }
     }
 
-    if let Err(failure) = spawn_node("npx", &["tsc"]) {
+    if let Err(failure) = run_tsc(&root) {
         // A build that stopped on a type error leaves whatever `tsc` had
         // already emitted, and nothing copies the manifest in afterwards. That
         // directory is startable-looking and not startable; upstream removes
@@ -523,6 +533,25 @@ pub fn run_build() -> Result<(), String> {
     make_output_self_contained(out.as_deref(), &rc.meta_file_patterns)
 }
 
+/// Compile the project with its own `tsc`, stdio inherited.
+fn run_tsc(root: &std::path::Path) -> Result<(), String> {
+    let mut command = crate::tools::tsc(root)?;
+    let name = crate::tools::program_name(&command);
+    let status = command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|e| format!("Failed to run '{name}': {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "'{name}' exited with code {}",
+            status.code().unwrap_or(-1)
+        ));
+    }
+    Ok(())
+}
+
 /// Where `tsc` will write, resolved the way `tsc` itself resolves it.
 ///
 /// Asked of the compiler rather than parsed out of `tsconfig.json`: a project's
@@ -535,9 +564,10 @@ pub fn run_build() -> Result<(), String> {
 /// that would not run, an answer pointing outside the project. Nothing is
 /// removed in that case — the build still runs, it just keeps whatever was
 /// there, which is what it did before this existed.
-fn build_output_dir() -> Option<std::path::PathBuf> {
-    let output = Command::new("npx")
-        .args(["tsc", "--showConfig"])
+fn build_output_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let output = crate::tools::tsc(root)
+        .ok()?
+        .arg("--showConfig")
         .stdin(Stdio::null())
         .output()
         .ok()?;
@@ -1598,7 +1628,7 @@ pub fn info() -> Result<(), String> {
     }
 
     // pnpm version
-    match Command::new("pnpm").arg("--version").output() {
+    match crate::tools::command("pnpm").arg("--version").output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             println!(

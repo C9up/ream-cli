@@ -102,6 +102,36 @@ fn a_failed_install_fails_the_command() {
     );
 }
 
+/// On Windows pnpm is a `.cmd` shim (npm, corepack), and Rust's `Command` only
+/// appends `.exe` to a bare name — so `ream new` used to stop on "program not
+/// found" with pnpm installed. The stand-in exits 3, so reaching it is proven by
+/// the install being reported as FAILED rather than as missing.
+#[cfg(windows)]
+#[test]
+fn a_cmd_shim_package_manager_is_started_on_windows() {
+    let dir = TempDir::new("cmd-shim");
+    let bin = dir.path.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("pnpm.cmd"), "@exit /b 3\r\n").unwrap();
+    let path = format!(
+        "{};{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let output = cli()
+        .args(["new", "demo", "--template", "api", "--db", "sqlite", "-y"])
+        .current_dir(&dir.path)
+        .env("PATH", path)
+        .output()
+        .expect("spawn ream new");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("pnpm install failed"), "{stderr}");
+    assert!(!stderr.contains("not found"), "{stderr}");
+}
+
 /// A project fresh out of `ream new` installs, and passes its own tests.
 ///
 /// The generated `tests/bootstrap.ts` used to call `configure()` at import

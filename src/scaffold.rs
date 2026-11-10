@@ -4,7 +4,6 @@ use dialoguer::Select;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::process::Command;
 
 /// What `ream new` was told on the command line.
 ///
@@ -101,7 +100,7 @@ pub fn run(name: &str, options: &NewOptions<'_>) -> Result<(), String> {
 
     // Run pnpm install
     println!("  Installing dependencies...\n");
-    let status = Command::new("pnpm")
+    let status = crate::tools::command("pnpm")
         .arg("install")
         .current_dir(root)
         .stdin(std::process::Stdio::inherit())

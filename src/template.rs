@@ -23,7 +23,6 @@
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 /// Returns the upstream git URL for a known template, or `None` for unknown ones.
 fn template_registry(name: &str) -> Option<&'static str> {
@@ -59,7 +58,7 @@ pub fn run(name: &str, destination: Option<&str>) -> Result<(), String> {
     }
 
     println!("  Cloning {} into {} …", url, dest);
-    let status = Command::new("git")
+    let status = crate::tools::command("git")
         .args(["clone", "--depth=1", url, dest])
         .status()
         .map_err(|e| format!("`git clone` failed: {}. Is git on PATH?", e))?;
@@ -75,7 +74,7 @@ pub fn run(name: &str, destination: Option<&str>) -> Result<(), String> {
     fs::remove_dir_all(&upstream_git)
         .map_err(|e| format!("Failed to remove cloned .git: {}", e))?;
 
-    let status = Command::new("git")
+    let status = crate::tools::command("git")
         .args(["init", "-b", "main"])
         .current_dir(dest_path)
         .status()
