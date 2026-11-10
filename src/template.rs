@@ -22,7 +22,6 @@
 
 use serde_json::Value;
 use std::fs;
-use std::path::Path;
 
 /// Returns the upstream git URL for a known template, or `None` for unknown ones.
 fn template_registry(name: &str) -> Option<&'static str> {
@@ -49,7 +48,12 @@ pub fn run(name: &str, destination: Option<&str>) -> Result<(), String> {
         )
     })?;
 
-    let dest_path = Path::new(dest);
+    // Absolute before it reaches git: a relative destination such as
+    // `--template=<dir>` would otherwise be read as an option (and run that
+    // directory's hooks), and the `.git` removal below would aim elsewhere.
+    let dest_path = std::env::current_dir()
+        .map_err(|e| format!("Failed to read current directory: {}", e))?
+        .join(dest);
     if dest_path.exists() {
         return Err(format!(
             "Destination '{}' already exists — refusing to clobber.",
@@ -59,7 +63,8 @@ pub fn run(name: &str, destination: Option<&str>) -> Result<(), String> {
 
     println!("  Cloning {} into {} …", url, dest);
     let status = crate::tools::command("git")
-        .args(["clone", "--depth=1", url, dest])
+        .args(["clone", "--depth=1", "--", url])
+        .arg(&dest_path)
         .status()
         .map_err(|e| format!("`git clone` failed: {}. Is git on PATH?", e))?;
     if !status.success() {
@@ -76,7 +81,7 @@ pub fn run(name: &str, destination: Option<&str>) -> Result<(), String> {
 
     let status = crate::tools::command("git")
         .args(["init", "-b", "main"])
-        .current_dir(dest_path)
+        .current_dir(&dest_path)
         .status()
         .map_err(|e| format!("`git init` failed: {}", e))?;
     if !status.success() {
