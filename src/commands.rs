@@ -1723,13 +1723,27 @@ const APP_COVERAGE_INCLUDE: &[&str] = &[
     "src/**/*.{ts,tsx,js,mjs,cjs}",
 ];
 
-pub fn run_tests(
-    suites: &[String],
-    threads: Option<usize>,
-    reporters: Option<&str>,
-    bail: bool,
-    coverage: CoverageFlags<'_>,
-) -> Result<(), String> {
+/// `ream test`'s own flags, named and shaped as the console's `test` command
+/// declares them.
+#[derive(Default)]
+pub struct TestFlags<'a> {
+    pub suites: &'a [String],
+    pub threads: Option<usize>,
+    pub reporters: Option<&'a str>,
+    pub bail: bool,
+    pub files: &'a [String],
+    pub tags: &'a [String],
+    pub groups: &'a [String],
+    pub tests: &'a [String],
+    pub timeout: Option<u64>,
+    pub retries: Option<u32>,
+    pub failed: bool,
+    pub watch: bool,
+    pub poll: bool,
+    pub no_clear: bool,
+}
+
+pub fn run_tests(flags: &TestFlags<'_>, coverage: CoverageFlags<'_>) -> Result<(), String> {
     if !std::path::Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
@@ -1740,7 +1754,7 @@ pub fn run_tests(
         );
     }
 
-    let options = test_options(suites, threads, reporters, bail, &coverage)?;
+    let options = test_options(flags, &coverage)?;
 
     let script = format!(
         r#"
@@ -1804,22 +1818,47 @@ pub fn run_tests(
 /// from the command line, and interpolating it raw into the script would let it
 /// break out into executable code.
 fn test_options(
-    suites: &[String],
-    threads: Option<usize>,
-    reporters: Option<&str>,
-    bail: bool,
+    flags: &TestFlags<'_>,
     coverage: &CoverageFlags<'_>,
 ) -> Result<serde_json::Value, String> {
+    // The runner's filter object, upstream's `filters`: only the lists given,
+    // or nothing at all, so an absent filter can never read as "match none".
+    let mut filters = serde_json::Map::new();
+    for (name, values) in [
+        ("files", flags.files),
+        ("tags", flags.tags),
+        ("groups", flags.groups),
+        ("tests", flags.tests),
+    ] {
+        if !values.is_empty() {
+            filters.insert(name.to_string(), serde_json::json!(values));
+        }
+    }
+    let filters = if filters.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::Object(filters)
+    };
+
     Ok(serde_json::json!({
-        "suites": suites,
-        "threads": threads,
-        "reporters": reporters.map(|r| {
+        "suites": flags.suites,
+        "threads": flags.threads,
+        "filters": filters,
+        "timeout": flags.timeout,
+        "retries": flags.retries,
+        // Switches are sent only when turned on (off for `clear`): an absent
+        // key leaves the runner's own default in place.
+        "failed": flags.failed.then_some(true),
+        "watch": flags.watch.then_some(true),
+        "poll": flags.poll.then_some(true),
+        "clear": flags.no_clear.then_some(false),
+        "reporters": flags.reporters.map(|r| {
             r.split(',')
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
         }),
-        "bail": bail,
+        "bail": flags.bail,
         // Explicit rather than inherited: this process also carries
         // `--input-type=module`, which a worker spawned with a file entry
         // must not receive.
@@ -1916,7 +1955,7 @@ fn coverage_options(flags: &CoverageFlags<'_>) -> Result<serde_json::Value, Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{coverage_options, CoverageFlags};
+    use super::{coverage_options, CoverageFlags, TestFlags};
 
     fn flags<'a>() -> CoverageFlags<'a> {
         CoverageFlags {
@@ -2248,8 +2287,14 @@ mod tests {
         // literal. What could terminate that literal is a double quote or a
         // newline; interpolated raw, this name would close it and run code.
         let hostile = "a\", process.exit(42); //\nb".to_string();
-        let options =
-            test_options(std::slice::from_ref(&hostile), None, None, false, &flags()).unwrap();
+        let options = test_options(
+            &TestFlags {
+                suites: std::slice::from_ref(&hostile),
+                ..TestFlags::default()
+            },
+            &flags(),
+        )
+        .unwrap();
 
         let rendered = options.to_string();
         // Round-trips as data...
@@ -2270,21 +2315,90 @@ mod tests {
 
     #[test]
     fn reporters_are_split_and_emptied_entries_dropped() {
-        let options = test_options(&[], None, Some("spec, json ,,"), false, &flags()).unwrap();
+        let options = test_options(
+            &TestFlags {
+                reporters: Some("spec, json ,,"),
+                ..TestFlags::default()
+            },
+            &flags(),
+        )
+        .unwrap();
         assert_eq!(options["reporters"], serde_json::json!(["spec", "json"]));
     }
 
     #[test]
     fn absent_options_stay_null_so_the_script_deletes_them() {
         // `runTests` fills its own defaults; a `null` would override them.
-        let options = test_options(&[], None, None, false, &flags()).unwrap();
+        let options = test_options(&TestFlags::default(), &flags()).unwrap();
         assert!(options["threads"].is_null());
         assert!(options["reporters"].is_null());
     }
 
     #[test]
+    fn no_filter_or_switch_is_sent_unless_given() {
+        let options = test_options(&TestFlags::default(), &flags()).unwrap();
+        for key in [
+            "filters", "timeout", "retries", "failed", "watch", "poll", "clear",
+        ] {
+            assert!(options[key].is_null(), "{key} = {}", options[key]);
+        }
+    }
+
+    #[test]
+    fn filters_reach_the_runner_in_one_object_and_only_the_given_ones() {
+        let files = vec!["tests/functional/root.test.ts".to_string()];
+        let tests = vec![
+            "renders the home page".to_string(),
+            "a title, with a comma".to_string(),
+        ];
+        let tags = vec!["@slow".to_string(), "~@flaky".to_string()];
+        let options = test_options(
+            &TestFlags {
+                files: &files,
+                tests: &tests,
+                tags: &tags,
+                ..TestFlags::default()
+            },
+            &flags(),
+        )
+        .unwrap();
+        assert_eq!(
+            options["filters"],
+            serde_json::json!({
+                "files": ["tests/functional/root.test.ts"],
+                "tags": ["@slow", "~@flaky"],
+                // A test title is never split on its commas.
+                "tests": ["renders the home page", "a title, with a comma"],
+            })
+        );
+    }
+
+    #[test]
+    fn tuning_flags_keep_their_types() {
+        let options = test_options(
+            &TestFlags {
+                timeout: Some(5000),
+                retries: Some(2),
+                failed: true,
+                watch: true,
+                poll: true,
+                no_clear: true,
+                ..TestFlags::default()
+            },
+            &flags(),
+        )
+        .unwrap();
+        assert_eq!(options["timeout"], serde_json::json!(5000));
+        assert_eq!(options["retries"], serde_json::json!(2));
+        assert_eq!(options["failed"], serde_json::json!(true));
+        assert_eq!(options["watch"], serde_json::json!(true));
+        assert_eq!(options["poll"], serde_json::json!(true));
+        assert_eq!(options["clear"], serde_json::json!(false));
+    }
+
+    #[test]
     fn workers_are_spawned_with_the_swc_loader_not_input_type() {
-        let options = test_options(&[], None, None, false, &flags()).unwrap();
+        let options = test_options(&TestFlags::default(), &flags()).unwrap();
         let args = options["nodeArgs"].as_array().expect("nodeArgs is a list");
         assert_eq!(
             args,

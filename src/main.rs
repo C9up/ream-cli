@@ -47,6 +47,70 @@ enum McpAction {
     Status,
 }
 
+/// `ream test`'s arguments, boxed in [`Commands::Test`] to keep the enum small.
+#[derive(clap::Args)]
+struct TestArgs {
+    /// Suite names to run. Omit to run every declared suite, in order.
+    suites: Vec<String>,
+    /// Concurrent worker processes
+    #[arg(long)]
+    threads: Option<usize>,
+    /// Comma-separated reporters, e.g. spec,json
+    #[arg(long)]
+    reporters: Option<String>,
+    /// Stop at the first failure
+    #[arg(long)]
+    bail: bool,
+    /// Filter tests by file name (repeat the flag for several)
+    #[arg(long = "files", value_name = "FILE")]
+    files: Vec<String>,
+    /// Filter tests by tag (repeat the flag for several)
+    #[arg(long = "tags", value_name = "TAG")]
+    tags: Vec<String>,
+    /// Filter tests by parent group title (repeat the flag for several)
+    #[arg(long = "groups", value_name = "GROUP")]
+    groups: Vec<String>,
+    /// Filter tests by test title (repeat the flag for several)
+    #[arg(long = "tests", value_name = "TITLE")]
+    tests: Vec<String>,
+    /// Default timeout for every test, in milliseconds
+    #[arg(long, value_name = "MS")]
+    timeout: Option<u64>,
+    /// Default retries for every test
+    #[arg(long)]
+    retries: Option<u32>,
+    /// Run only the tests that failed during the last run
+    #[arg(long)]
+    failed: bool,
+    /// Watch the filesystem and re-run the tests on change
+    #[arg(long)]
+    watch: bool,
+    /// Use polling to detect filesystem changes (with --watch)
+    #[arg(long)]
+    poll: bool,
+    /// Keep the previous output on screen when --watch re-runs
+    #[arg(long = "no-clear", action = clap::ArgAction::SetTrue)]
+    no_clear: bool,
+    /// Collect V8 coverage for the run
+    #[arg(long)]
+    coverage: bool,
+    /// Comma-separated coverage reporters, e.g. text-summary,lcov
+    #[arg(long = "coverage-reporters")]
+    coverage_reporters: Option<String>,
+    /// Directory the coverage reports are written to
+    #[arg(long = "coverage-dir")]
+    coverage_dir: Option<String>,
+    /// Inline JSON thresholds, e.g. {"lines":80,"functions":75}
+    #[arg(long = "coverage-thresholds")]
+    coverage_thresholds: Option<String>,
+    /// Comma-separated globs to measure, overriding the app layout
+    #[arg(long = "coverage-include")]
+    coverage_include: Option<String>,
+    /// Comma-separated globs to leave out of the measurement
+    #[arg(long = "coverage-exclude")]
+    coverage_exclude: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Create a new Ream project
@@ -101,37 +165,7 @@ enum Commands {
     Build,
 
     /// Run the test suites declared in reamrc.ts (`tests` block)
-    Test {
-        /// Suite names to run. Omit to run every declared suite, in order.
-        suites: Vec<String>,
-        /// Concurrent worker processes
-        #[arg(long)]
-        threads: Option<usize>,
-        /// Comma-separated reporters, e.g. spec,json
-        #[arg(long)]
-        reporters: Option<String>,
-        /// Stop at the first failure
-        #[arg(long)]
-        bail: bool,
-        /// Collect V8 coverage for the run
-        #[arg(long)]
-        coverage: bool,
-        /// Comma-separated coverage reporters, e.g. text-summary,lcov
-        #[arg(long = "coverage-reporters")]
-        coverage_reporters: Option<String>,
-        /// Directory the coverage reports are written to
-        #[arg(long = "coverage-dir")]
-        coverage_dir: Option<String>,
-        /// Inline JSON thresholds, e.g. {"lines":80,"functions":75}
-        #[arg(long = "coverage-thresholds")]
-        coverage_thresholds: Option<String>,
-        /// Comma-separated globs to measure, overriding the app layout
-        #[arg(long = "coverage-include")]
-        coverage_include: Option<String>,
-        /// Comma-separated globs to leave out of the measurement
-        #[arg(long = "coverage-exclude")]
-        coverage_exclude: Option<String>,
-    },
+    Test(Box<TestArgs>),
 
     /// Configure a package (auto-setup provider, config, env)
     Configure {
@@ -282,7 +316,7 @@ fn native_command_name(command: &Commands) -> Option<&'static str> {
         Commands::Dev { .. } => Some("dev"),
         Commands::Start => Some("start"),
         Commands::Build => Some("build"),
-        Commands::Test { .. } => Some("test"),
+        Commands::Test(_) => Some("test"),
         Commands::Inspect => Some("inspect"),
         Commands::Doctor => Some("doctor"),
         Commands::Info => Some("info"),
@@ -400,22 +434,46 @@ fn main() {
         Commands::Dev { no_clear } => commands::run_dev(!no_clear),
         Commands::Start => commands::run_start(),
         Commands::Build => commands::run_build(),
-        Commands::Test {
-            suites,
-            threads,
-            reporters,
-            bail,
-            coverage,
-            coverage_reporters,
-            coverage_dir,
-            coverage_thresholds,
-            coverage_include,
-            coverage_exclude,
-        } => commands::run_tests(
-            &suites,
-            threads,
-            reporters.as_deref(),
-            bail,
+        Commands::Test(args) => {
+            let TestArgs {
+                suites,
+                threads,
+                reporters,
+                bail,
+                files,
+                tags,
+                groups,
+                tests,
+                timeout,
+                retries,
+                failed,
+                watch,
+                poll,
+                no_clear,
+                coverage,
+                coverage_reporters,
+                coverage_dir,
+                coverage_thresholds,
+                coverage_include,
+                coverage_exclude,
+            } = *args;
+            commands::run_tests(
+            &commands::TestFlags {
+                suites: &suites,
+                threads,
+                reporters: reporters.as_deref(),
+                bail,
+                files: &files,
+                tags: &tags,
+                groups: &groups,
+                tests: &tests,
+                timeout,
+                retries,
+                failed,
+                watch,
+                poll,
+                no_clear,
+            },
             commands::CoverageFlags {
                 enabled: coverage,
                 reporters: coverage_reporters.as_deref(),
@@ -424,7 +482,8 @@ fn main() {
                 include: coverage_include.as_deref(),
                 exclude: coverage_exclude.as_deref(),
             },
-        ),
+        )
+        }
         Commands::Configure { package, force, flags } => add::parse_flag_pairs(&flags)
             .and_then(|pairs| match codemods::configure_with_flags(&package, force, &pairs)? {
                 codemods::ConfigureOutcome::Configured => Ok(()),
@@ -509,6 +568,57 @@ mod dispatch_tests {
         Cli::parse_from(full)
             .command
             .expect("a command was given, so one must parse")
+    }
+
+    #[test]
+    fn test_takes_the_console_filters_repeated() {
+        // `ream test --files=a.ts --files b.ts --tests "x, y"` was refused as
+        // an unexpected argument.
+        match command_for(&[
+            "test",
+            "functional",
+            "--files=tests/a.test.ts",
+            "--files",
+            "tests/b.test.ts",
+            "--tests",
+            "x, y",
+            "--tags=@slow",
+            "--groups",
+            "Users",
+            "--timeout=2000",
+            "--retries",
+            "1",
+            "--failed",
+            "--watch",
+            "--poll",
+            "--no-clear",
+        ]) {
+            Commands::Test(args) => {
+                let super::TestArgs {
+                    suites,
+                    files,
+                    tests,
+                    tags,
+                    groups,
+                    timeout,
+                    retries,
+                    failed,
+                    watch,
+                    poll,
+                    no_clear,
+                    ..
+                } = *args;
+                assert_eq!(suites, ["functional"]);
+                assert_eq!(files, ["tests/a.test.ts", "tests/b.test.ts"]);
+                assert_eq!(tests, ["x, y"]);
+                assert_eq!(tags, ["@slow"]);
+                assert_eq!(groups, ["Users"]);
+                assert_eq!(timeout, Some(2000));
+                assert_eq!(retries, Some(1));
+                assert!(failed && watch && poll && no_clear);
+            }
+            _ => panic!("`test` must parse as the native test command"),
+        }
     }
 
     #[test]
