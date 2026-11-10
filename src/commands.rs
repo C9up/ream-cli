@@ -1304,12 +1304,19 @@ fn warn_app_commands(reason: &str) {
 /// The console prints a single list; splitting "framework" from "app" would make the
 /// user care about which side implements what. App commands are read as JSON so
 /// they can be merged rather than appended.
+///
+/// Reading them RUNS the project's console entry, so only an explicit
+/// `ream list` does (`include_app`). Help and a bare `ream` are what someone
+/// types in a repository they just cloned, to find out what it is; they list
+/// this binary's commands and say where the rest are.
 pub fn run_list(
     framework: &[ListEntry],
     as_json: bool,
     namespaces: &[String],
+    include_app: bool,
 ) -> Result<(), String> {
-    let app_entries = if std::path::Path::new("package.json").exists() {
+    let in_project = std::path::Path::new("package.json").exists();
+    let app_entries = if in_project && include_app {
         app_commands()
     } else {
         Vec::new()
@@ -1389,6 +1396,16 @@ pub fn run_list(
         );
     }
     println!();
+    if in_project && !include_app {
+        println!(
+            "{}",
+            crate::ui::paint(
+                "This project's own commands are not listed: `ream list` runs its console entry to read them.",
+                crate::ui::DIM
+            )
+        );
+        println!();
+    }
 
     Ok(())
 }

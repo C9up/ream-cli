@@ -308,9 +308,16 @@ fn describe_arguments(sub: &clap::Command) -> (Vec<serde_json::Value>, Vec<serde
     (args, flags)
 }
 
-/// The name clap matched, for the commands an application could plausibly want
-/// to redefine. `new` and `template` are excluded: they run outside a project,
-/// where there is no app to ask.
+/// The name clap matched, for the commands an application may redefine.
+///
+/// Only commands that run the project anyway (they boot it, compile it or
+/// start its server), so a redefinition executes nothing the user did not ask
+/// for. NAMED DEVIATION: upstream lets an application shadow any command,
+/// because its console is the project's own file (`node ace`); this binary is
+/// typed in any directory, a freshly cloned one included. So `doctor` and
+/// `info` stay inert, `generate:key` (which writes the secret) cannot be
+/// captured by a file in `commands/`, and `new`/`template` run outside a
+/// project.
 fn native_command_name(command: &Commands) -> Option<&'static str> {
     match command {
         Commands::Dev { .. } => Some("dev"),
@@ -318,10 +325,7 @@ fn native_command_name(command: &Commands) -> Option<&'static str> {
         Commands::Build => Some("build"),
         Commands::Test(_) => Some("test"),
         Commands::Inspect => Some("inspect"),
-        Commands::Doctor => Some("doctor"),
-        Commands::Info => Some("info"),
         Commands::Repl => Some("repl"),
-        Commands::GenerateKey { .. } => Some("generate:key"),
         // The console kernel ships its own `list`, which is not what this means:
         // the scan only sees a `commandName` literal under `commands/`, so this
         // forwards only when the APPLICATION wrote one, and then it wins like
@@ -341,7 +345,8 @@ fn native_command_name(command: &Commands) -> Option<&'static str> {
 /// Console does not split them: its `help` flag is documented as "Display help
 /// for the given command. WHEN NO COMMAND IS GIVEN DISPLAY HELP FOR THE LIST
 /// COMMAND". So a bare help is the list, and `--help` after a command keeps
-/// clap's per-command page, which is what "for the given command" means.
+/// clap's per-command page, which is what "for the given command" means. That
+/// list is this binary's own: reading the app's runs its code (see `run_list`).
 fn is_bare_help(args: &[String]) -> bool {
     let mut saw_help = false;
     for arg in args {
@@ -373,7 +378,7 @@ fn main() {
         }
         // `run_list` prints its own usage line; clap's would be a second one
         // saying the same thing in a different shape.
-        if let Err(err) = commands::run_list(&framework_commands(), false, &[]) {
+        if let Err(err) = commands::run_list(&framework_commands(), false, &[], false) {
             ui::error(&err);
             std::process::exit(1);
         }
@@ -392,11 +397,15 @@ fn main() {
         unsafe { std::env::remove_var("NO_COLOR") };
     }
 
-    // No subcommand: a bare `ream` is `ream list`.
-    let command = cli.command.unwrap_or(Commands::List {
-        namespaces: Vec::new(),
-        json: false,
-    });
+    // No subcommand: a bare `ream` is the help listing, which runs nothing
+    // from the project it is typed in.
+    let Some(command) = cli.command else {
+        if let Err(err) = commands::run_list(&framework_commands(), false, &[], false) {
+            ui::error(&err);
+            std::process::exit(1);
+        }
+        return;
+    };
 
     // The console resolves every command through one registry, so an application can
     // define its own `build` or `test`. Clap matched a native command by name;
@@ -506,7 +515,7 @@ fn main() {
         Commands::Repl => commands::run_repl(),
         Commands::Info => commands::info(),
         Commands::List { namespaces, json } => {
-            commands::run_list(&framework_commands(), json, &namespaces)
+            commands::run_list(&framework_commands(), json, &namespaces, true)
         }
         Commands::External(argv) => commands::run_console(&argv),
     };
@@ -550,8 +559,8 @@ mod help_tests {
 
     #[test]
     fn no_arguments_at_all_is_not_help() {
-        // A bare `ream` is already `ream list`; routing it through the help
-        // path would print the same thing by a second route.
+        // A bare `ream` reaches the same inert listing through clap (no
+        // subcommand); `list` is the explicit request that merges the app's.
         assert!(!is_bare_help(&args(&[])));
         assert!(!is_bare_help(&args(&["list"])));
     }
