@@ -228,14 +228,14 @@ pub(crate) fn parse_npm_spec(input: &str) -> Result<(String, String), String> {
 ///
 /// - `--key=value`               → `[("key", ["value"])]`
 /// - `--key value` (no `=`)      → `[("key", ["value"])]`
-/// - `--key` (boolean)           → `[("key", ["true"])]`
+/// - `--key` (boolean)           → `[("key", [None])]`
 /// - repeated keys accumulate    → `[("key", ["a", "b"])]`
 /// - bare positional arg         → `Err`
 ///
 /// Made `pub` so the `Configure` subcommand dispatcher in `main.rs` can reuse
 /// it. `--dev` and `--force` are eaten by clap before they reach this parser.
-pub fn parse_flag_pairs(raw: &[String]) -> Result<Vec<(String, Vec<String>)>, String> {
-    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+pub fn parse_flag_pairs(raw: &[String]) -> Result<crate::codemods::FlagPairs, String> {
+    let mut out: crate::codemods::FlagPairs = Vec::new();
     let mut i = 0;
     while i < raw.len() {
         let item = &raw[i];
@@ -298,11 +298,12 @@ pub fn parse_flag_pairs(raw: &[String]) -> Result<Vec<(String, Vec<String>)>, St
             ));
         }
 
-        let v = value.unwrap_or_else(|| "true".to_string());
+        // A bare flag stays `None`: the hook's `parsedFlags` reads it as
+        // `true`, which `--key=true` (a string) is not.
         if let Some(slot) = out.iter_mut().find(|(k, _)| k == &key) {
-            slot.1.push(v);
+            slot.1.push(value);
         } else {
-            out.push((key, vec![v]));
+            out.push((key, vec![value]));
         }
         i += 1;
     }
@@ -417,7 +418,7 @@ mod tests {
         let out = parse_flag_pairs(&raw).unwrap();
         assert_eq!(
             out,
-            vec![("transports".to_string(), vec!["smtp".to_string()])]
+            vec![("transports".to_string(), vec![Some("smtp".to_string())])]
         );
     }
 
@@ -432,7 +433,7 @@ mod tests {
             out,
             vec![(
                 "transports".to_string(),
-                vec!["smtp".to_string(), "resend".to_string()]
+                vec![Some("smtp".to_string()), Some("resend".to_string())]
             )]
         );
     }
@@ -441,7 +442,7 @@ mod tests {
     fn parse_boolean_flag_no_value() {
         let raw = vec!["--ssl".to_string()];
         let out = parse_flag_pairs(&raw).unwrap();
-        assert_eq!(out, vec![("ssl".to_string(), vec!["true".to_string()])]);
+        assert_eq!(out, vec![("ssl".to_string(), vec![None])]);
     }
 
     #[test]
@@ -450,7 +451,7 @@ mod tests {
         let out = parse_flag_pairs(&raw).unwrap();
         assert_eq!(
             out,
-            vec![("driver".to_string(), vec!["postgres".to_string()])]
+            vec![("driver".to_string(), vec![Some("postgres".to_string())])]
         );
     }
 
@@ -463,8 +464,8 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                ("ssl".to_string(), vec!["true".to_string()]),
-                ("verbose".to_string(), vec!["true".to_string()]),
+                ("ssl".to_string(), vec![None]),
+                ("verbose".to_string(), vec![None]),
             ]
         );
     }
@@ -499,7 +500,10 @@ mod tests {
         // `--regex=a=b` — split on FIRST `=` only.
         let raw = vec!["--regex=a=b".to_string()];
         let out = parse_flag_pairs(&raw).unwrap();
-        assert_eq!(out, vec![("regex".to_string(), vec!["a=b".to_string()])]);
+        assert_eq!(
+            out,
+            vec![("regex".to_string(), vec![Some("a=b".to_string())])]
+        );
     }
 
     #[test]
@@ -531,8 +535,8 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                ("http-only".to_string(), vec!["true".to_string()]),
-                ("user_id".to_string(), vec!["42".to_string()]),
+                ("http-only".to_string(), vec![Some("true".to_string())]),
+                ("user_id".to_string(), vec![Some("42".to_string())]),
             ]
         );
     }
