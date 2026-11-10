@@ -70,7 +70,11 @@ pub fn run(name: &str, options: &NewOptions<'_>) -> Result<(), String> {
     write_file(root, "package.json", &package_json(name, template))?;
     write_file(root, "tsconfig.json", &tsconfig())?;
     write_file(root, ".swcrc", &swcrc())?;
-    write_file(root, ".env", &env_file(name, database))?;
+    let env = env_file(name, database);
+    write_file(root, ".env", &env)?;
+    // Committed (only `.env` is ignored): what a teammate who clones the
+    // project copies to `.env`, with every variable and none of the secrets.
+    write_file(root, ".env.example", &env_example(&env))?;
     // The environment's TYPES come from `start/env.ts` — `Env.create` returns a
     // typed accessor, so `env.get('PORT')` is a number without a second
     // hand-maintained declaration to keep in step with the schema.
@@ -395,6 +399,20 @@ fn env_file(name: &str, database: &str) -> String {
     } else {
         format!("APP_NAME={}\n{}NODE_ENV=development\nPORT=3000\n\nDB_CONNECTION=sqlite\nDB_FILENAME=./data/{}.sqlite\n", name, app_key, name)
     }
+}
+
+/// Variables `.env.example` names without their value: a committed file must
+/// not hold a secret, even a development one.
+const SECRET_ENV_KEYS: &[&str] = &["APP_KEY", "DB_PASSWORD"];
+
+/// `.env` with the secrets emptied, line for line.
+fn env_example(env: &str) -> String {
+    env.lines()
+        .map(|line| match line.split_once('=') {
+            Some((key, _)) if SECRET_ENV_KEYS.contains(&key) => format!("{key}=\n"),
+            _ => format!("{line}\n"),
+        })
+        .collect()
 }
 
 /// `start/env.ts` — the runtime validation of the environment, in the shape the
@@ -1066,6 +1084,31 @@ mod tests {
             "APP_KEY must not be optional — got:\n{}",
             env
         );
+    }
+
+    /// `.env.example` is the committed record of what the app needs: every key
+    /// of `.env`, with the secrets left empty.
+    #[test]
+    fn the_env_example_lists_every_key_without_the_secrets() {
+        for database in ["postgres", "sqlite"] {
+            let env = env_file("demo", database);
+            let example = env_example(&env);
+            let keys = |text: &str| -> Vec<String> {
+                text.lines()
+                    .filter_map(|line| line.split_once('='))
+                    .map(|(key, _)| key.to_string())
+                    .collect()
+            };
+            assert_eq!(keys(&env), keys(&example), "{database}");
+            assert!(example.contains("APP_KEY=\n"), "{example}");
+            let key = crate::envfile::read_env_value(&env, "APP_KEY").unwrap();
+            assert!(!example.contains(&key), "the key leaked into:\n{example}");
+            if database == "postgres" {
+                assert!(example.contains("DB_PASSWORD=\n"), "{example}");
+                assert!(example.contains("DB_HOST=localhost\n"), "{example}");
+            }
+            assert!(example.contains("PORT=3000\n"), "{example}");
+        }
     }
 
     /// Every scaffolded app gets its OWN key. A shared placeholder is a signing

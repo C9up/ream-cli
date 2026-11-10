@@ -91,6 +91,17 @@ fn a_failed_install_fails_the_command() {
         "pnpm 10 reads the same approval under its own key — got:\n{workspace}"
     );
 
+    // The committed record of the variables, without the generated key.
+    let example = read(&project.join(".env.example"));
+    assert!(example.contains("APP_KEY=\n"), "{example}");
+    assert!(example.contains("DB_CONNECTION=sqlite"), "{example}");
+    assert!(
+        !read(&project.join(".gitignore"))
+            .lines()
+            .any(|l| l == ".env.example"),
+        ".env.example must be committed"
+    );
+
     let manifest = read(&project.join("package.json"));
     assert!(manifest.contains("\"version\": \"0.1.0\""), "{manifest}");
     assert!(

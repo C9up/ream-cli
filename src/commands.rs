@@ -947,6 +947,20 @@ pub fn run_generate_key(force: bool, show: bool) -> Result<(), String> {
     let updated = crate::envfile::upsert_env_var(&existing, "APP_KEY", &key);
     std::fs::write(env_path, updated).map_err(|e| format!("Failed to write .env: {}", e))?;
 
+    // The committed example records the variable with an empty value, and
+    // only where the project keeps one — the way upstream's env editor writes
+    // `APP_KEY=` there. The key itself never leaves `.env`.
+    let example_path = std::path::Path::new(".env.example");
+    if example_path.is_file() {
+        let example = std::fs::read_to_string(example_path)
+            .map_err(|e| format!("Failed to read .env.example: {}", e))?;
+        let updated = crate::envfile::upsert_env_var(&example, "APP_KEY", "");
+        if updated != example {
+            std::fs::write(example_path, updated)
+                .map_err(|e| format!("Failed to write .env.example: {}", e))?;
+        }
+    }
+
     println!();
     let lines = vec![
         crate::ui::paint("Generated APP_KEY", crate::ui::GREEN),
