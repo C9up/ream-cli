@@ -412,7 +412,7 @@ fn start_env(database: &str) -> String {
         "  DB_CONNECTION: Env.schema.enum(['postgres', 'sqlite'] as const),\n  DB_FILENAME: Env.schema.string(),"
     };
     format!(
-        "import {{ Env }} from '@c9up/ream'\n\nexport default await Env.create(new URL('../', import.meta.url), {{\n  APP_NAME: Env.schema.string(),\n  // Signs cookies, sessions and CSRF tokens. Required: without it the app\n  // refuses to start, rather than serving unsigned values that read as signed.\n  APP_KEY: Env.schema.string(),\n  NODE_ENV: Env.schema.enum(['development', 'production', 'test'] as const),\n  PORT: Env.schema.number(),\n{}\n}})\n",
+        "import {{ Env }} from '@c9up/ream'\n\nexport default await Env.create(new URL('../', import.meta.url), {{\n  APP_NAME: Env.schema.string(),\n  // Signs cookies, sessions and CSRF tokens. Required: without it the app\n  // refuses to start, rather than serving unsigned values that read as signed.\n  // A secret, so it prints as [redacted]; `.release()` reads the value.\n  APP_KEY: Env.schema.secret(),\n  NODE_ENV: Env.schema.enum(['development', 'production', 'test'] as const),\n  PORT: Env.schema.number(),\n{}\n}})\n",
         db_vars
     )
 }
@@ -587,7 +587,8 @@ export default defineConfig({
   // Through the validated environment, never `process.env` directly: the
   // schema in start/env.ts is what guarantees the key is there at all, and
   // reading around it gives back `string | undefined` typed as a string.
-  secret: env.get('APP_KEY'),
+  // Released here, where the raw key is needed, and nowhere else.
+  secret: env.get('APP_KEY').release(),
 })
 "#,
     )?;
@@ -626,7 +627,8 @@ export default defineConfig({
   // Through the validated environment, never `process.env` directly: the
   // schema in start/env.ts is what guarantees the key is there at all, and
   // reading around it gives back `string | undefined` typed as a string.
-  secret: env.get('APP_KEY'),
+  // Released here, where the raw key is needed, and nowhere else.
+  secret: env.get('APP_KEY').release(),
 })
 "#,
     )?;
@@ -1049,11 +1051,13 @@ mod tests {
 
     /// `start/env.ts` requires APP_KEY, and there is no second hand-maintained
     /// type declaration to drift from it — the types come from `Env.create`.
+    /// Declared as a secret, so the key prints as `[redacted]` in any log or
+    /// JSON dump of the environment or of a config that holds it.
     #[test]
     fn start_env_requires_the_app_key() {
         let env = start_env("sqlite");
         assert!(
-            env.contains("Env.create") && env.contains("APP_KEY: Env.schema.string()"),
+            env.contains("Env.create") && env.contains("APP_KEY: Env.schema.secret()"),
             "start/env.ts must require APP_KEY — got:\n{}",
             env
         );
@@ -1137,8 +1141,9 @@ mod tests {
 
         let session = fs::read_to_string(root.join("config/session.ts")).unwrap();
         assert!(
-            session.contains("store: 'cookie'") && session.contains("env.get('APP_KEY')"),
-            "config/session.ts must sign the cookie store with APP_KEY — got:\n{session}"
+            session.contains("store: 'cookie'")
+                && session.contains("secret: env.get('APP_KEY').release()"),
+            "config/session.ts must sign the cookie store with the released APP_KEY — got:\n{session}"
         );
 
         let auth = fs::read_to_string(root.join("config/auth.ts")).unwrap();
@@ -1150,7 +1155,7 @@ mod tests {
 
         let bh = fs::read_to_string(root.join("config/blackhole.ts")).unwrap();
         assert!(
-            bh.contains("csrf") && bh.contains("secret"),
+            bh.contains("csrf") && bh.contains("secret: env.get('APP_KEY').release()"),
             "config/blackhole.ts must enable signed CSRF with a secret — got:\n{}",
             bh
         );
