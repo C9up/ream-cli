@@ -67,6 +67,7 @@ fn a_failed_install_fails_the_command() {
         .args(["new", "demo", "--template", "api", "--db", "sqlite", "-y"])
         .current_dir(&dir.path)
         .env("PATH", path)
+        .env_remove("npm_config_user_agent")
         .output()
         .expect("spawn ream new");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -110,6 +111,178 @@ fn a_failed_install_fails_the_command() {
             env!("CARGO_PKG_VERSION")
         )),
         "the scripts call `ream`, so the project must carry the CLI that wrote it — got:\n{manifest}"
+    );
+}
+
+/// A directory of stand-in package managers and git, each recording
+/// `<tool> <cwd> <args>` into `calls.log` and succeeding.
+#[cfg(unix)]
+fn recording_tools(dir: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("tools");
+    std::fs::create_dir_all(&bin).unwrap();
+    for tool in ["pnpm", "npm", "yarn", "git"] {
+        let path = bin.join(tool);
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\necho \"{tool} $PWD $*\" >> '{}'\nexit 0\n",
+                dir.join("calls.log").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+#[cfg(unix)]
+fn ream_new(cwd: &Path, path: &str, args: &[&str]) -> std::process::Output {
+    cli()
+        .arg("new")
+        .args(args)
+        .args(["--template", "api", "--db", "sqlite", "-y"])
+        .current_dir(cwd)
+        .env("PATH", path)
+        .env_remove("npm_config_user_agent")
+        .output()
+        .expect("spawn ream new")
+}
+
+#[cfg(unix)]
+fn calls(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("calls.log"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// A monorepo scaffolds into `apps/api`, named `api`.
+#[cfg(unix)]
+#[test]
+fn the_destination_is_a_path_and_names_the_package_by_its_last_directory() {
+    let dir = TempDir::new("path-dest");
+    let path = recording_tools(&dir.path);
+    let output = ream_new(&dir.path, &path, &["apps/api"]);
+    assert!(output.status.success(), "{output:?}");
+
+    let project = dir.path.join("apps/api");
+    let manifest = read(&project.join("package.json"));
+    assert!(manifest.contains("\"name\": \"api\""), "{manifest}");
+    let project = std::fs::canonicalize(project).unwrap();
+    assert_eq!(
+        calls(&dir.path),
+        [format!("pnpm {} install", project.display())]
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("cd apps/api"));
+}
+
+/// `ream new .` fills the empty directory it is typed in.
+#[cfg(unix)]
+#[test]
+fn an_empty_directory_is_filled_in_place() {
+    let dir = TempDir::new("dot");
+    let here = dir.path.join("here");
+    std::fs::create_dir_all(&here).unwrap();
+    let path = recording_tools(&dir.path);
+    let output = ream_new(&here, &path, &["."]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(read(&here.join("package.json")).contains("\"name\": \"here\""));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("cd ."));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_with_anything_in_it_is_refused_untouched() {
+    let dir = TempDir::new("not-empty");
+    let taken = dir.path.join("taken");
+    std::fs::create_dir_all(&taken).unwrap();
+    std::fs::write(taken.join("notes.txt"), "mine").unwrap();
+    let path = recording_tools(&dir.path);
+    let output = ream_new(&dir.path, &path, &["taken"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not empty"));
+    assert!(!taken.join("package.json").exists());
+    assert!(calls(&dir.path).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn pkg_chooses_the_installer_and_only_pnpm_gets_its_workspace_file() {
+    for (pm, workspace) in [("npm", false), ("yarn", false), ("pnpm", true)] {
+        let dir = TempDir::new(&format!("pkg-{pm}"));
+        let path = recording_tools(&dir.path);
+        let output = ream_new(&dir.path, &path, &["demo", "--pkg", pm]);
+        assert!(output.status.success(), "{pm}: {output:?}");
+        let project = std::fs::canonicalize(dir.path.join("demo")).unwrap();
+        assert_eq!(
+            calls(&dir.path),
+            [format!("{pm} {} install", project.display())]
+        );
+        assert_eq!(
+            project.join("pnpm-workspace.yaml").exists(),
+            workspace,
+            "{pm}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unknown_pkg_is_refused_before_anything_is_written() {
+    let dir = TempDir::new("pkg-bun");
+    let path = recording_tools(&dir.path);
+    let output = ream_new(&dir.path, &path, &["demo", "--pkg", "bun"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("pnpm"),
+        "{output:?}"
+    );
+    assert!(!dir.path.join("demo").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_launching_package_manager_installs_when_none_is_named() {
+    let dir = TempDir::new("user-agent");
+    let path = recording_tools(&dir.path);
+    let output = cli()
+        .args(["new", "demo", "--template", "api", "--db", "sqlite", "-y"])
+        .current_dir(&dir.path)
+        .env("PATH", &path)
+        .env(
+            "npm_config_user_agent",
+            "yarn/4.5.0 npm/? node/v22.0.0 linux x64",
+        )
+        .output()
+        .expect("spawn ream new");
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        calls(&dir.path)[0].starts_with("yarn "),
+        "{:?}",
+        calls(&dir.path)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn git_init_runs_in_the_project_before_the_install() {
+    let dir = TempDir::new("git-init");
+    let path = recording_tools(&dir.path);
+    let output = ream_new(&dir.path, &path, &["demo", "--git-init"]);
+    assert!(output.status.success(), "{output:?}");
+    let project = std::fs::canonicalize(dir.path.join("demo")).unwrap();
+    assert_eq!(
+        calls(&dir.path),
+        [
+            format!("git {} init", project.display()),
+            format!("pnpm {} install", project.display()),
+        ]
     );
 }
 

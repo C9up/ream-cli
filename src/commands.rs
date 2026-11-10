@@ -479,7 +479,16 @@ pub fn run_dev(clear_screen: bool) -> Result<(), String> {
 /// Assets first: a stylesheet the templates reference has to exist before the
 /// build that copies it, and a failing asset build must stop the run rather
 /// than ship a dist with a stale file in it.
-pub fn run_build() -> Result<(), String> {
+/// `ream build`'s flags, as the console's `build` command names them.
+#[derive(Default)]
+pub struct BuildOptions<'a> {
+    /// Keep the output of a build that has type errors, and finish it.
+    pub ignore_ts_errors: bool,
+    /// The tsconfig to compile with, instead of `tsconfig.json`.
+    pub tsconfig: Option<&'a str>,
+}
+
+pub fn run_build(options: &BuildOptions<'_>) -> Result<(), String> {
     if !std::path::Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
@@ -501,7 +510,7 @@ pub fn run_build() -> Result<(), String> {
     // Node went on importing it — a build that was half the previous one.
     // Before the assets step too, so a pipeline writing into the output is
     // not erased a moment after it ran.
-    let out = build_output_dir(&root);
+    let out = build_output_dir(&root, options.tsconfig);
     if let Some(dir) = out.as_deref() {
         empty_build_output(dir)?;
     }
@@ -518,24 +527,41 @@ pub fn run_build() -> Result<(), String> {
         }
     }
 
-    if let Err(failure) = run_tsc(&root) {
-        // A build that stopped on a type error leaves whatever `tsc` had
-        // already emitted, and nothing copies the manifest in afterwards. That
-        // directory is startable-looking and not startable; upstream removes
-        // it for the same reason. Best-effort: the compile error is the news,
-        // and failing to tidy up must not replace it.
-        if let Some(dir) = out.as_deref() {
-            let _ = std::fs::remove_dir_all(dir);
+    if let Err(failure) = run_tsc(&root, options.tsconfig) {
+        if options.ignore_ts_errors {
+            // Asked for: `tsc` still emits on a type error, and the output is
+            // finished like any other.
+            crate::ui::warning(&format!("{failure} — kept the output (--ignore-ts-errors)"));
+        } else {
+            // A build that stopped on a type error leaves whatever `tsc` had
+            // already emitted, and nothing copies the manifest in afterwards.
+            // That directory is startable-looking and not startable; upstream
+            // removes it for the same reason. Best-effort: the compile error is
+            // the news, and failing to tidy up must not replace it.
+            if let Some(dir) = out.as_deref() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            return Err(format!(
+                "{failure}\n  The build stopped on TypeScript errors. Use --ignore-ts-errors to keep the output anyway."
+            ));
         }
-        return Err(failure);
     }
 
     make_output_self_contained(out.as_deref(), &rc.meta_file_patterns)
 }
 
-/// Compile the project with its own `tsc`, stdio inherited.
-fn run_tsc(root: &std::path::Path) -> Result<(), String> {
+/// `tsc`, pointed at `tsconfig` when one was named.
+fn tsc_for(root: &std::path::Path, tsconfig: Option<&str>) -> Result<Command, String> {
     let mut command = crate::tools::tsc(root)?;
+    if let Some(project) = tsconfig {
+        command.args(["--project", project]);
+    }
+    Ok(command)
+}
+
+/// Compile the project with its own `tsc`, stdio inherited.
+fn run_tsc(root: &std::path::Path, tsconfig: Option<&str>) -> Result<(), String> {
+    let mut command = tsc_for(root, tsconfig)?;
     let name = crate::tools::program_name(&command);
     let status = command
         .stdin(Stdio::inherit())
@@ -564,8 +590,8 @@ fn run_tsc(root: &std::path::Path) -> Result<(), String> {
 /// that would not run, an answer pointing outside the project. Nothing is
 /// removed in that case — the build still runs, it just keeps whatever was
 /// there, which is what it did before this existed.
-fn build_output_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
-    let output = crate::tools::tsc(root)
+fn build_output_dir(root: &std::path::Path, tsconfig: Option<&str>) -> Option<std::path::PathBuf> {
+    let output = tsc_for(root, tsconfig)
         .ok()?
         .arg("--showConfig")
         .stdin(Stdio::null())

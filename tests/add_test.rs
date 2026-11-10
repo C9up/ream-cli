@@ -349,12 +349,13 @@ fn dry_run_without_log_fails_loudly() {
 
 #[test]
 fn rejects_positional_arg_and_short_circuits_install() {
-    // Positional args after the package name are rejected by parse_flag_pairs,
-    // which runs BEFORE the install dispatch — the dry-run log must stay
-    // empty (no install line written).
+    // A positional after the flags have started is rejected by
+    // parse_flag_pairs, which runs BEFORE the install dispatch — the dry-run
+    // log must stay empty (no install line written). Before the flags, a
+    // second positional is a second package.
     let p = ream_project("positional");
     p.touch("pnpm-lock.yaml");
-    let output = run_add_dry(&p, &["@c9up/atlas", "extra-positional"]);
+    let output = run_add_dry(&p, &["@c9up/atlas", "--driver=pg", "extra-positional"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -446,4 +447,43 @@ fn configure_subcommand_accepts_trailing_flags() {
         "expected positional-arg parse error, got: {}",
         stderr
     );
+}
+
+#[test]
+fn several_packages_install_in_one_command_and_each_is_configured() {
+    let p = ream_project("several");
+    p.touch("pnpm-lock.yaml");
+    install_stub_ts_loader(&p);
+    let output = run_add_dry(&p, &["@c9up/atlas", "@c9up/rune@1", "--dev"]);
+    assert_eq!(
+        p.read_dry_run_log(),
+        "pnpm add -D @c9up/atlas @c9up/rune@1\n",
+        "{output:?}"
+    );
+    // Neither is installed (dry run), so both report a missing hook.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("@c9up/atlas has no configure() hook")
+            && stdout.contains("@c9up/rune@1 has no configure() hook"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn a_chosen_package_manager_needs_no_lockfile() {
+    let p = ream_project("chosen-pm");
+    let output = run_add_dry(&p, &["@c9up/atlas", "--package-manager", "npm"]);
+    assert_eq!(
+        p.read_dry_run_log(),
+        "npm install @c9up/atlas\n",
+        "{output:?}"
+    );
+}
+
+#[test]
+fn a_chosen_package_manager_wins_over_the_lockfile() {
+    let p = ream_project("chosen-over-lock");
+    p.touch("pnpm-lock.yaml");
+    let output = run_add_dry(&p, &["--package-manager=yarn", "@c9up/atlas"]);
+    assert_eq!(p.read_dry_run_log(), "yarn add @c9up/atlas\n", "{output:?}");
 }

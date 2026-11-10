@@ -15,31 +15,103 @@ pub struct NewOptions<'a> {
     pub template: Option<&'a str>,
     pub database: Option<&'a str>,
     pub yes: bool,
+    /// `--pkg`: the package manager that installs the project.
+    pub package_manager: Option<&'a str>,
+    /// `--git-init`: start a repository in the new project.
+    pub git_init: bool,
 }
 
-pub fn run(name: &str, options: &NewOptions<'_>) -> Result<(), String> {
-    // Validate project name
-    if !name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err("Project name must be alphanumeric with hyphens/underscores only".to_string());
-    }
+const PACKAGE_MANAGERS: [&str; 3] = ["pnpm", "npm", "yarn"];
 
-    let target = Path::new(name);
-    if target.exists() || target.is_symlink() {
-        return Err(format!("'{}' already exists", name));
+/// The package manager that launched this process (`pnpm dlx`, `npx`,
+/// `yarn dlx`), read from the user agent it exports, as upstream's creator
+/// does. NAMED DEVIATION: without one — `ream` run directly — pnpm rather than
+/// npm, since the scaffold approves `@swc/core`'s build for pnpm and the
+/// documentation installs with it.
+fn launching_package_manager(user_agent: Option<&str>) -> &'static str {
+    let launcher = user_agent
+        .and_then(|agent| agent.split('/').next())
+        .unwrap_or("");
+    PACKAGE_MANAGERS
+        .iter()
+        .find(|pm| **pm == launcher)
+        .copied()
+        .unwrap_or("pnpm")
+}
+
+/// The package name a destination gives: its last component, which must be
+/// a valid name on its own.
+fn project_name(target: &Path) -> Result<String, String> {
+    let name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("Cannot name a project after '{}'", target.display()))?;
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "Project name '{name}' (the destination's last directory) must be alphanumeric with hyphens/underscores only"
+        ));
     }
+    Ok(name.to_string())
+}
+
+/// Whether `target` is already there as an empty directory the project may
+/// fill. A file, a symbolic link or a directory with anything in it is refused.
+fn existing_empty_dir(target: &Path, shown: &str) -> Result<bool, String> {
+    match fs::symlink_metadata(target) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(format!(
+            "'{shown}' is a symbolic link — refusing to scaffold through it"
+        )),
+        Ok(meta) if meta.is_dir() => {
+            let mut entries =
+                fs::read_dir(target).map_err(|e| format!("Failed to read '{shown}': {e}"))?;
+            if entries.next().is_some() {
+                Err(format!("'{shown}' already exists and is not empty"))
+            } else {
+                Ok(true)
+            }
+        }
+        Ok(_) => Err(format!("'{shown}' already exists")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("Failed to inspect '{shown}': {e}")),
+    }
+}
+
+/// `ream new <destination>`: any path, as upstream's creator takes one —
+/// `apps/api` in a monorepo, `.` for the directory you stand in. The package
+/// is named after its last component.
+pub fn run(destination: &str, options: &NewOptions<'_>) -> Result<(), String> {
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("Failed to read current directory: {e}"))?;
+    let target = cwd.join(destination);
+    let reuse = existing_empty_dir(&target, destination)?;
+    // `.` and `..` have no last component until resolved, and they exist.
+    let name = if reuse {
+        project_name(
+            &fs::canonicalize(&target)
+                .map_err(|e| format!("Failed to resolve '{destination}': {e}"))?,
+        )?
+    } else {
+        project_name(&target)?
+    };
+    let name = name.as_str();
 
     println!("\n  \x1b[1mCreating Ream project: {}\x1b[0m\n", name);
 
     const TEMPLATES: [&str; 4] = ["api", "web", "microservice", "slim"];
     const DATABASES: [&str; 2] = ["postgres", "sqlite"];
-    // Both flags are checked before either prompt: a bad value is an error in
-    // the command line, and must be reported as one whether or not there is a
+    // Every flag is checked before any prompt: a bad value is an error in the
+    // command line, and must be reported as one whether or not there is a
     // terminal to prompt on.
     validate("template", &TEMPLATES, options.template)?;
     validate("db", &DATABASES, options.database)?;
+    validate("pkg", &PACKAGE_MANAGERS, options.package_manager)?;
+    let package_manager = options.package_manager.unwrap_or_else(|| {
+        launching_package_manager(std::env::var("npm_config_user_agent").ok().as_deref())
+    });
 
     let template = choose("template", &TEMPLATES, options.template, options.yes)?;
     let database = choose("db", &DATABASES, options.database, options.yes)?;
@@ -54,16 +126,27 @@ pub fn run(name: &str, options: &NewOptions<'_>) -> Result<(), String> {
     // the actual filesystem so every subsequent write_file() call is anchored
     // to the same canonical path — independent of the caller's CWD.
     //
-    // Atomic create: `create_dir` (NOT `_all`) fails with `EEXIST` if
-    // anything already exists at `target` — file, dir, OR symlink. Closes
-    // the TOCTOU between the `target.is_symlink()` precheck above and the
-    // `canonicalize` below; without it, a co-resident attacker could plant
-    // a symlink in the prompt window and capture the entire scaffold.
-    // `name` is single-component (alphanumeric+`-`+`_`), so non-recursive
-    // create is sufficient.
-    fs::create_dir(target).map_err(|e| format!("Failed to create '{}': {}", name, e))?;
-    let root_canon = fs::canonicalize(target)
-        .map_err(|e| format!("Failed to canonicalize project root '{}': {}", name, e))?;
+    // The parents are the user's path and are created as needed. The project
+    // directory itself is created atomically: `create_dir` (NOT `_all`) fails
+    // with `EEXIST` if anything already exists at `target` — file, dir, OR
+    // symlink. Closes the TOCTOU between the check above and the
+    // `canonicalize` below; without it, a co-resident attacker could plant a
+    // symlink in the prompt window and capture the entire scaffold. An empty
+    // directory the user named is filled in place, as upstream's creator does.
+    if !reuse {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create '{}': {}", parent.display(), e))?;
+        }
+        fs::create_dir(&target)
+            .map_err(|e| format!("Failed to create '{}': {}", destination, e))?;
+    }
+    let root_canon = fs::canonicalize(&target).map_err(|e| {
+        format!(
+            "Failed to canonicalize project root '{}': {}",
+            destination, e
+        )
+    })?;
     let root = root_canon.as_path();
 
     // Common files
@@ -85,7 +168,10 @@ pub fn run(name: &str, options: &NewOptions<'_>) -> Result<(), String> {
         write_file(root, "start/env.ts", &start_env(database))?;
     }
     write_file(root, ".gitignore", GITIGNORE)?;
-    write_file(root, "pnpm-workspace.yaml", PNPM_WORKSPACE)?;
+    // pnpm's own settings file; the other managers neither read nor need it.
+    if package_manager == "pnpm" {
+        write_file(root, "pnpm-workspace.yaml", PNPM_WORKSPACE)?;
+    }
     write_file(root, "reamrc.ts", &reamrc(template))?;
     // Console entry. The microservice template runs a standalone bin/server.ts
     // with no Ignitor or rc file, so it has no console kernel to reach.
@@ -102,9 +188,23 @@ pub fn run(name: &str, options: &NewOptions<'_>) -> Result<(), String> {
         _ => write_slim_template(root, name)?,
     }
 
-    // Run pnpm install
-    println!("  Installing dependencies...\n");
-    let status = crate::tools::command("pnpm")
+    // Before the install, as upstream orders it: the repository then exists
+    // even when the install fails.
+    if options.git_init {
+        let status = crate::tools::command("git")
+            .arg("init")
+            .current_dir(root)
+            .status()
+            .map_err(|e| format!("Could not run git ({e}) — '{destination}' was written."))?;
+        if !status.success() {
+            return Err(format!(
+                "git init failed ({status}) — '{destination}' was written but is not a repository."
+            ));
+        }
+    }
+
+    println!("  Installing dependencies with {package_manager}...\n");
+    let status = crate::tools::command(package_manager)
         .arg("install")
         .current_dir(root)
         .stdin(std::process::Stdio::inherit())
@@ -119,20 +219,22 @@ pub fn run(name: &str, options: &NewOptions<'_>) -> Result<(), String> {
         Ok(s) if s.success() => {}
         Ok(s) => {
             return Err(format!(
-                "pnpm install failed ({}) — '{}' was written but its dependencies are not installed. Fix the error above, then run `pnpm install` in it.",
-                s, name
+                "{pm} install failed ({}) — '{}' was written but its dependencies are not installed. Fix the error above, then run `{pm} install` in it.",
+                s, destination, pm = package_manager
             ))
         }
         Err(e) => {
             return Err(format!(
-                "Could not run pnpm ({}) — '{}' was written but its dependencies are not installed. Install pnpm, then run `pnpm install` in it.",
-                e, name
+                "Could not run {pm} ({}) — '{}' was written but its dependencies are not installed. Install {pm}, then run `{pm} install` in it.",
+                e, destination, pm = package_manager
             ))
         }
     }
 
     println!("\n  \x1b[32mDone!\x1b[0m Next steps:\n");
-    println!("    cd {}", name);
+    if root != cwd.as_path() {
+        println!("    cd {}", destination);
+    }
     println!("    ream dev\n");
 
     Ok(())
@@ -1084,6 +1186,37 @@ mod tests {
             "APP_KEY must not be optional — got:\n{}",
             env
         );
+    }
+
+    #[test]
+    fn the_launcher_is_read_from_the_user_agent_and_pnpm_is_the_fallback() {
+        assert_eq!(
+            launching_package_manager(Some("npm/10.8.0 node/v22.0.0 linux x64")),
+            "npm"
+        );
+        assert_eq!(
+            launching_package_manager(Some("yarn/4.5.0 npm/? node/v22")),
+            "yarn"
+        );
+        assert_eq!(
+            launching_package_manager(Some("pnpm/9.12.0 npm/? node/v22")),
+            "pnpm"
+        );
+        // A launcher this command does not drive, or none at all.
+        assert_eq!(
+            launching_package_manager(Some("bun/1.1.0 npm/? node/v22")),
+            "pnpm"
+        );
+        assert_eq!(launching_package_manager(Some("")), "pnpm");
+        assert_eq!(launching_package_manager(None), "pnpm");
+    }
+
+    #[test]
+    fn the_package_is_named_after_the_last_directory() {
+        assert_eq!(project_name(Path::new("/w/apps/api")).unwrap(), "api");
+        assert_eq!(project_name(Path::new("/w/apps/api/")).unwrap(), "api");
+        assert!(project_name(Path::new("/w/My App")).is_err());
+        assert!(project_name(Path::new("/w/..")).is_err());
     }
 
     /// `.env.example` is the committed record of what the app needs: every key

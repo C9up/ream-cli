@@ -23,6 +23,18 @@ enum PackageManager {
 }
 
 impl PackageManager {
+    /// `--package-manager <name>`, refused when it is not one this command drives.
+    fn named(name: &str) -> Result<Self, String> {
+        match name {
+            "pnpm" => Ok(Self::Pnpm),
+            "npm" => Ok(Self::Npm),
+            "yarn" => Ok(Self::Yarn),
+            other => Err(format!(
+                "Unknown package manager '{other}' — one of pnpm, npm, yarn."
+            )),
+        }
+    }
+
     fn binary(&self) -> &'static str {
         match self {
             Self::Pnpm => "pnpm",
@@ -121,14 +133,14 @@ fn detect_package_manager_from(
     ))
 }
 
-fn install_args(pm: PackageManager, dev: bool, package: &str) -> Vec<String> {
-    match pm {
+/// One install command for every package, as upstream's `installPackages`.
+fn install_args(pm: PackageManager, dev: bool, packages: &[String]) -> Vec<String> {
+    let mut a = match pm {
         PackageManager::Pnpm | PackageManager::Yarn => {
             let mut a = vec!["add".to_string()];
             if dev {
                 a.push("-D".to_string());
             }
-            a.push(package.to_string());
             a
         }
         PackageManager::Npm => {
@@ -136,10 +148,66 @@ fn install_args(pm: PackageManager, dev: bool, package: &str) -> Vec<String> {
             if dev {
                 a.push("--save-dev".to_string());
             }
-            a.push(package.to_string());
             a
         }
+    };
+    a.extend(packages.iter().cloned());
+    a
+}
+
+/// What `ream add` was asked, once its own flags are out of the way.
+#[derive(Debug, PartialEq)]
+pub struct AddRequest {
+    pub packages: Vec<String>,
+    pub dev: bool,
+    pub force: bool,
+    pub package_manager: Option<String>,
+    pub raw_flags: Vec<String>,
+}
+
+/// Split `ream add`'s arguments: the packages first, then flags.
+///
+/// clap stops recognising `--dev` once the package list has started (the list
+/// accepts `--x=y` values for the hooks), so this command's own flags are
+/// taken out here, wherever they sit: `--dev`/`-D`, `--force`,
+/// `--package-manager <name>`. What remains belongs to the configure hooks.
+pub fn split_add_args(
+    raw: &[String],
+    dev: bool,
+    force: bool,
+    package_manager: Option<String>,
+) -> Result<AddRequest, String> {
+    let mut request = AddRequest {
+        packages: Vec::new(),
+        dev,
+        force,
+        package_manager,
+        raw_flags: Vec::new(),
+    };
+    let mut tokens = raw.iter().peekable();
+    while let Some(token) = tokens.next_if(|token| !token.starts_with('-')) {
+        request.packages.push(token.clone());
     }
+    if request.packages.is_empty() {
+        return Err("Name at least one package to add, e.g. `ream add @c9up/atlas`.".to_string());
+    }
+    while let Some(token) = tokens.next() {
+        match token.as_str() {
+            "--dev" | "-D" => request.dev = true,
+            "--force" => request.force = true,
+            "--package-manager" => match tokens.next_if(|next| !next.starts_with('-')) {
+                Some(name) => request.package_manager = Some(name.clone()),
+                None => {
+                    return Err("--package-manager needs a value: pnpm, npm or yarn.".to_string())
+                }
+            },
+            other => match other.strip_prefix("--package-manager=") {
+                Some(name) => request.package_manager = Some(name.to_string()),
+                None => request.raw_flags.push(token.clone()),
+            },
+        }
+    }
+    Ok(request)
 }
 
 /// Parse an npm-spec string into `(bare_name, full_spec)`.
@@ -310,31 +378,45 @@ pub fn parse_flag_pairs(raw: &[String]) -> Result<crate::codemods::FlagPairs, St
     Ok(out)
 }
 
-pub fn run(spec: &str, dev: bool, force: bool, flags: &[String]) -> Result<(), String> {
+pub fn run(request: &AddRequest) -> Result<(), String> {
     // Pre-flight: in a Ream project.
     if !Path::new("package.json").exists() {
         return Err("Not in a Ream project (no package.json found)".to_string());
     }
-    // Split the user input into bare name (used for the dynamic `import()`
+    // Split each spec into its bare name (used for the dynamic `import()`
     // dispatched to `configure_with_flags`) and the full spec (forwarded
     // verbatim to the package manager so `react@19`, `@c9up/atlas@^1.2.3`,
     // dist-tags, and `npm:` aliases all work).
-    let (bare, full_spec) = parse_npm_spec(spec)?;
+    let specs = request
+        .packages
+        .iter()
+        .map(|spec| parse_npm_spec(spec))
+        .collect::<Result<Vec<_>, _>>()?;
+    let full_specs: Vec<String> = specs.iter().map(|(_, full)| full.clone()).collect();
 
     // Parse flags BEFORE install — fail fast on malformed input rather than
     // half-way through the operation.
-    let pairs = parse_flag_pairs(flags)?;
+    let pairs = parse_flag_pairs(&request.raw_flags)?;
 
-    let (pm, secondary) = detect_package_manager(&bare)?;
-    for ignored in &secondary {
-        eprintln!(
-            "  warning: ignoring secondary lockfile {} (using {} per detection precedence)",
-            ignored,
-            lockfile_for(pm)
-        );
-    }
+    let pm = match request.package_manager.as_deref() {
+        // Chosen: no lockfile is consulted, as upstream's `--package-manager`.
+        Some(name) => PackageManager::named(name)?,
+        None => {
+            let (pm, secondary) = detect_package_manager(&full_specs.join(" "))?;
+            for ignored in &secondary {
+                eprintln!(
+                    "  warning: ignoring secondary lockfile {} (using {} per detection precedence)",
+                    ignored,
+                    lockfile_for(pm)
+                );
+            }
+            pm
+        }
+    };
 
-    let args = install_args(pm, dev, &full_spec);
+    let args = install_args(pm, request.dev, &full_specs);
+    let force = request.force;
+    let full_spec = full_specs.join(", ");
 
     println!("\n  Adding {} with {}...\n", full_spec, pm.binary());
 
@@ -392,18 +474,32 @@ pub fn run(spec: &str, dev: bool, force: bool, flags: &[String]) -> Result<(), S
     // identifiers (`import 'react@19'` does not work). The version reached
     // disk via the package manager above; from here on `react` resolves to
     // whatever pnpm/yarn/npm just installed.
-    match codemods::configure_with_flags(&bare, force, &pairs)? {
-        codemods::ConfigureOutcome::Configured => {
-            println!();
-            crate::ui::success(&format!("{} added.", full_spec));
-            println!();
+    //
+    // Each package is configured in turn, with the same flags, and a failure
+    // does not stop the next one — upstream's `add` reports every outcome,
+    // then fails the command if any configure did.
+    let mut failed = Vec::new();
+    for (bare, full_spec) in &specs {
+        match codemods::configure_with_flags(bare, force, &pairs) {
+            Ok(codemods::ConfigureOutcome::Configured) => {
+                println!();
+                crate::ui::success(&format!("{} added.", full_spec));
+                println!();
+            }
+            Ok(codemods::ConfigureOutcome::NoHook) => {
+                println!(
+                    "\n  Note: {} has no configure() hook — package installed; see the package's README for any manual setup.\n",
+                    full_spec
+                );
+            }
+            Err(error) => {
+                crate::ui::error(&error);
+                failed.push(full_spec.clone());
+            }
         }
-        codemods::ConfigureOutcome::NoHook => {
-            println!(
-                "\n  Note: {} has no configure() hook — package installed; see the package's README for any manual setup.\n",
-                full_spec
-            );
-        }
+    }
+    if !failed.is_empty() {
+        return Err(format!("Unable to configure {}", failed.join(", ")));
     }
     Ok(())
 }
@@ -541,10 +637,92 @@ mod tests {
         );
     }
 
+    fn strings(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn several_packages_install_in_one_command() {
+        assert_eq!(
+            install_args(
+                PackageManager::Npm,
+                true,
+                &strings(&["@c9up/atlas", "@c9up/rune@1"])
+            ),
+            strings(&["install", "--save-dev", "@c9up/atlas", "@c9up/rune@1"])
+        );
+    }
+
+    #[test]
+    fn the_packages_come_first_and_this_commands_flags_are_taken_anywhere() {
+        let request = split_add_args(
+            &strings(&[
+                "@c9up/atlas",
+                "@c9up/rune",
+                "--driver=pg",
+                "--dev",
+                "--ssl",
+                "--package-manager",
+                "npm",
+                "--force",
+            ]),
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            AddRequest {
+                packages: strings(&["@c9up/atlas", "@c9up/rune"]),
+                dev: true,
+                force: true,
+                package_manager: Some("npm".to_string()),
+                raw_flags: strings(&["--driver=pg", "--ssl"]),
+            }
+        );
+    }
+
+    #[test]
+    fn short_dev_and_the_equals_form_are_understood() {
+        let request = split_add_args(
+            &strings(&["pkg", "-D", "--package-manager=yarn"]),
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(request.dev);
+        assert_eq!(request.package_manager.as_deref(), Some("yarn"));
+        assert!(request.raw_flags.is_empty());
+    }
+
+    #[test]
+    fn a_package_manager_without_a_name_or_no_package_is_refused() {
+        assert!(
+            split_add_args(&strings(&["pkg", "--package-manager"]), false, false, None).is_err()
+        );
+        assert!(split_add_args(
+            &strings(&["pkg", "--package-manager", "--ssl"]),
+            false,
+            false,
+            None
+        )
+        .is_err());
+        assert!(split_add_args(&strings(&["--ssl"]), false, false, None).is_err());
+    }
+
+    #[test]
+    fn only_the_managers_this_command_drives_can_be_named() {
+        assert_eq!(PackageManager::named("pnpm"), Ok(PackageManager::Pnpm));
+        let err = PackageManager::named("bun").unwrap_err();
+        assert!(err.contains("pnpm, npm, yarn"), "{err}");
+    }
+
     #[test]
     fn install_args_pnpm_regular() {
         assert_eq!(
-            install_args(PackageManager::Pnpm, false, "@c9up/atlas"),
+            install_args(PackageManager::Pnpm, false, &["@c9up/atlas".to_string()]),
             vec!["add".to_string(), "@c9up/atlas".to_string()]
         );
     }
@@ -552,7 +730,7 @@ mod tests {
     #[test]
     fn install_args_pnpm_dev() {
         assert_eq!(
-            install_args(PackageManager::Pnpm, true, "@c9up/atlas"),
+            install_args(PackageManager::Pnpm, true, &["@c9up/atlas".to_string()]),
             vec![
                 "add".to_string(),
                 "-D".to_string(),
@@ -564,7 +742,7 @@ mod tests {
     #[test]
     fn install_args_yarn_regular() {
         assert_eq!(
-            install_args(PackageManager::Yarn, false, "@c9up/photon"),
+            install_args(PackageManager::Yarn, false, &["@c9up/photon".to_string()]),
             vec!["add".to_string(), "@c9up/photon".to_string()]
         );
     }
@@ -572,7 +750,7 @@ mod tests {
     #[test]
     fn install_args_yarn_dev() {
         assert_eq!(
-            install_args(PackageManager::Yarn, true, "@c9up/photon"),
+            install_args(PackageManager::Yarn, true, &["@c9up/photon".to_string()]),
             vec![
                 "add".to_string(),
                 "-D".to_string(),
@@ -584,7 +762,7 @@ mod tests {
     #[test]
     fn install_args_npm_regular() {
         assert_eq!(
-            install_args(PackageManager::Npm, false, "@c9up/warden"),
+            install_args(PackageManager::Npm, false, &["@c9up/warden".to_string()]),
             vec!["install".to_string(), "@c9up/warden".to_string()]
         );
     }
@@ -592,7 +770,7 @@ mod tests {
     #[test]
     fn install_args_npm_dev() {
         assert_eq!(
-            install_args(PackageManager::Npm, true, "@c9up/warden"),
+            install_args(PackageManager::Npm, true, &["@c9up/warden".to_string()]),
             vec![
                 "install".to_string(),
                 "--save-dev".to_string(),

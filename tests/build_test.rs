@@ -185,3 +185,68 @@ esac"#,
     assert!(!p.exists("npx.calls"));
     assert!(!p.read("tsc.calls").is_empty());
 }
+
+/// A compiler that emits, then reports a type error — what `tsc` does on a
+/// project with one.
+fn failing_tsc(p: &TempProject) {
+    p.script(
+        "node_modules/.bin/tsc",
+        r#"echo "$@" >> "{root}/tsc.calls"
+case "$1" in
+  --showConfig) echo '{"compilerOptions":{"outDir":"./dist"}}' ;;
+  *) mkdir -p dist && echo built > dist/main.js; echo "error TS2322" >&2; exit 2 ;;
+esac"#,
+    );
+}
+
+#[test]
+fn a_type_error_fails_the_build_and_takes_the_output_with_it() {
+    let p = TempProject::new("ts-error");
+    failing_tsc(&p);
+    let output = p.build(&[]);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(
+        !p.exists("dist"),
+        "a half-built output was left: {}",
+        text(&output)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--ignore-ts-errors"), "{}", text(&output));
+}
+
+#[test]
+fn ignore_ts_errors_keeps_the_output_and_finishes_the_build() {
+    let p = TempProject::new("ignore-ts-errors");
+    failing_tsc(&p);
+    let output = p.build(&["--ignore-ts-errors"]);
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(p.exists("dist/main.js"), "{}", text(&output));
+    assert!(p.exists("dist/package.json"), "the manifest step still ran");
+}
+
+#[test]
+fn tsconfig_is_handed_to_every_tsc_call() {
+    let p = TempProject::new("tsconfig");
+    p.script(
+        "node_modules/.bin/tsc",
+        r#"echo "$@" >> "{root}/tsc.calls"
+case "$*" in
+  *--showConfig*) echo '{"compilerOptions":{"outDir":"./build"}}' ;;
+  *) mkdir -p build ;;
+esac"#,
+    );
+    p.write("build/stale.js", "old");
+    let output = p.build(&["--tsconfig", "tsconfig.build.json"]);
+    assert!(output.status.success(), "{}", text(&output));
+    let calls = p.read("tsc.calls");
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        [
+            "--project tsconfig.build.json --showConfig",
+            "--project tsconfig.build.json"
+        ],
+        "{calls}"
+    );
+    // The outDir of THAT config is what was emptied.
+    assert!(!p.exists("build/stale.js"));
+}

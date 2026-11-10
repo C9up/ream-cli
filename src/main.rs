@@ -115,8 +115,9 @@ struct TestArgs {
 enum Commands {
     /// Create a new Ream project
     New {
-        /// Project name
-        name: String,
+        /// Where to create it: a name, or any path (`apps/api`, `.`); the
+        /// package is named after its last directory
+        destination: String,
         /// Starting point: api, web, microservice or slim (skips the prompt)
         #[arg(long)]
         template: Option<String>,
@@ -126,6 +127,13 @@ enum Commands {
         /// Take the default for anything not passed as a flag — no terminal needed
         #[arg(long, short = 'y')]
         yes: bool,
+        /// Package manager that installs the project: pnpm, npm or yarn
+        /// (default: the one that launched ream, else pnpm)
+        #[arg(long = "pkg", value_name = "NAME")]
+        pkg: Option<String>,
+        /// Initialise a git repository in the new project
+        #[arg(long = "git-init")]
+        git_init: bool,
     },
 
     /// Install a project template by cloning its upstream repo (e.g. kitchen-sink)
@@ -136,19 +144,21 @@ enum Commands {
         destination: Option<String>,
     },
 
-    /// Install a package and run its configure() hook in one step
+    /// Install one or more packages and run their configure() hooks
     Add {
-        /// Package name (e.g., @c9up/atlas)
-        package: String,
-        /// Install as a devDependency
-        #[arg(long)]
+        /// Package names (e.g., @c9up/atlas @c9up/warden), then any flags for
+        /// their configure() hooks
+        #[arg(required = true, allow_hyphen_values = true, value_name = "PACKAGES")]
+        args: Vec<String>,
+        /// Install as devDependencies
+        #[arg(long, short = 'D')]
         dev: bool,
         /// Pass --force to the configure step (overwrites existing config files)
         #[arg(long)]
         force: bool,
-        /// Unknown flags forwarded to the package's configure() hook
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        flags: Vec<String>,
+        /// Use this package manager (pnpm, npm or yarn) instead of the lockfile's
+        #[arg(long = "package-manager", value_name = "NAME")]
+        package_manager: Option<String>,
     },
 
     /// Start development server — hot-reloads through hot-hook when the project has it, otherwise node --watch
@@ -162,7 +172,14 @@ enum Commands {
     Start,
 
     /// Build TypeScript to dist/
-    Build,
+    Build {
+        /// Keep the output when TypeScript reports errors, and finish the build
+        #[arg(long = "ignore-ts-errors")]
+        ignore_ts_errors: bool,
+        /// The tsconfig file to compile with (default: tsconfig.json)
+        #[arg(long, value_name = "PATH")]
+        tsconfig: Option<String>,
+    },
 
     /// Run the test suites declared in reamrc.ts (`tests` block)
     Test(Box<TestArgs>),
@@ -322,7 +339,7 @@ fn native_command_name(command: &Commands) -> Option<&'static str> {
     match command {
         Commands::Dev { .. } => Some("dev"),
         Commands::Start => Some("start"),
-        Commands::Build => Some("build"),
+        Commands::Build { .. } => Some("build"),
         Commands::Test(_) => Some("test"),
         Commands::Inspect => Some("inspect"),
         Commands::Repl => Some("repl"),
@@ -424,25 +441,40 @@ fn main() {
 
     let result = match command {
         Commands::New {
-            name,
+            destination,
             template,
             db,
             yes,
+            pkg,
+            git_init,
         } => scaffold::run(
-            &name,
+            &destination,
             &scaffold::NewOptions {
                 template: template.as_deref(),
                 database: db.as_deref(),
                 yes,
+                package_manager: pkg.as_deref(),
+                git_init,
             },
         ),
         Commands::Template { name, destination } => {
             template::run(&name, destination.as_deref())
         }
-        Commands::Add { package, dev, force, flags } => add::run(&package, dev, force, &flags),
+        Commands::Add {
+            args,
+            dev,
+            force,
+            package_manager,
+        } => add::split_add_args(&args, dev, force, package_manager).and_then(|request| add::run(&request)),
         Commands::Dev { no_clear } => commands::run_dev(!no_clear),
         Commands::Start => commands::run_start(),
-        Commands::Build => commands::run_build(),
+        Commands::Build {
+            ignore_ts_errors,
+            tsconfig,
+        } => commands::run_build(&commands::BuildOptions {
+            ignore_ts_errors,
+            tsconfig: tsconfig.as_deref(),
+        }),
         Commands::Test(args) => {
             let TestArgs {
                 suites,
