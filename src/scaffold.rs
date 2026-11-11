@@ -241,37 +241,76 @@ pub fn run(destination: &str, options: &NewOptions<'_>) -> Result<(), String> {
 }
 
 fn write_file(root: &Path, path: &str, content: &str) -> Result<(), String> {
+    // A NUL byte would make the OS see a different path than the one checked
+    // here; std refuses it at the syscall, but only after the directories on
+    // the way were made.
+    if path.contains('\0') {
+        return Err(format!("Refusing a path with a NUL byte: {:?}", path));
+    }
     // Reject paths that would escape `root` syntactically: `..` segments,
     // an absolute root (`/foo` on Unix, `\foo` on Windows), or a Windows
-    // drive prefix (`C:\foo`). `Path::join` silently discards `root` when
+    // drive prefix (`C:\foo`). `..` is refused rather than resolved, even
+    // when it climbs back inside. `Path::join` silently discards `root` when
     // the right-hand side is absolute, so this check is the only thing
     // standing between a future caller passing user-controlled `path`
     // and an arbitrary write — defense-in-depth, even though every
     // current call site uses a hardcoded literal.
     use std::path::Component;
+    let mut segments = Vec::new();
     for component in Path::new(path).components() {
-        if matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        ) {
-            return Err(format!("Refusing to write outside project root: {}", path));
+        match component {
+            Component::Normal(segment) => segments.push(segment),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("Refusing to write outside project root: {}", path));
+            }
         }
     }
-    let full = root.join(path);
-    if let Some(parent) = full.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        // `root` is already canonical (the caller resolves it once at the
-        // top of `run`); only `parent` needs canonicalization to detect a
-        // symlinked subdirectory whose realpath escapes the project root.
-        let canon_parent = fs::canonicalize(parent)
-            .map_err(|e| format!("Failed to canonicalize {}: {}", parent.display(), e))?;
-        if !canon_parent.starts_with(root) {
-            return Err(format!(
-                "Refusing to write outside project root (symlink): {}",
-                path
-            ));
+    let Some((leaf, dirs)) = segments.split_last() else {
+        return Err(format!("Refusing to write to an empty path: {:?}", path));
+    };
+    // The directories are walked one at a time from `root`, which the caller
+    // canonicalised once at the top of `run`. Each is either a real directory
+    // already or created here with `create_dir`, which never follows a link:
+    // a symlink on the way is refused before anything is made past it.
+    // `create_dir_all` followed the link and built the missing directories
+    // on the far side before any realpath check could object.
+    let mut dir = root.to_path_buf();
+    for segment in dirs {
+        dir.push(segment);
+        match fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!(
+                    "Refusing to write outside project root (symlink): {}",
+                    path
+                ));
+            }
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Err(format!(
+                    "Failed to create {}: {} is not a directory",
+                    path,
+                    dir.display()
+                ));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&dir)
+                    .map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
+            }
+            Err(e) => return Err(format!("Failed to inspect {}: {}", dir.display(), e)),
         }
     }
+    // The realpath of the parent, once the walk is done: a directory swapped
+    // for a link between the walk and here still cannot take the write out.
+    let canon_parent = fs::canonicalize(&dir)
+        .map_err(|e| format!("Failed to canonicalize {}: {}", dir.display(), e))?;
+    if !canon_parent.starts_with(root) {
+        return Err(format!(
+            "Refusing to write outside project root (symlink): {}",
+            path
+        ));
+    }
+    let full = dir.join(leaf);
     // Symlink-leaf check: `fs::symlink_metadata` does not follow symlinks,
     // so an existing leaf symlink is detected here regardless of whether
     // its target is inside or outside the project root. Kept for the
@@ -960,6 +999,65 @@ mod tests {
         );
         // No file was created anywhere we can observe.
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `..` is refused, not stripped or resolved: a path that climbs out of
+    /// the root, or climbs back into it, never reaches the filesystem.
+    #[test]
+    fn write_file_refuses_a_parent_segment() {
+        let base = unique_root("parent-segment");
+        let root = base.join("app");
+        fs::create_dir(&root).unwrap();
+        for path in ["../escape.txt", "a/../../escape.txt", "a/../inside.txt"] {
+            let err = write_file(&root, path, "// nope")
+                .expect_err("a `..` segment must be refused before anything is created");
+            assert!(err.contains("outside project root"), "{path}: {err}");
+        }
+        assert!(!base.join("escape.txt").exists());
+        assert!(!root.join("inside.txt").exists());
+        assert!(
+            !root.join("a").exists(),
+            "no directory is created on the way"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn write_file_refuses_a_nul_byte() {
+        let root = unique_root("nul-byte");
+        let err = write_file(&root, "config/app.ts\0.js", "// nope")
+            .expect_err("a NUL byte must be refused");
+        assert!(err.contains("NUL"), "unexpected error message: {err}");
+        assert!(!root.join("config").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A directory inside the root that is a symlink pointing out: the file is
+    /// refused, and so is every directory `create_dir_all` would have made
+    /// on the far side of the link before the realpath check ran.
+    #[cfg(unix)]
+    #[test]
+    fn write_file_refuses_a_symlinked_subdirectory() {
+        use std::os::unix::fs::symlink;
+        let root = unique_root("symlink-dir");
+        let outside = unique_root("symlink-dir-outside");
+        symlink(&outside, root.join("app")).unwrap();
+
+        let err = write_file(&root, "app/x.ts", "// nope")
+            .expect_err("a symlinked subdirectory must be refused");
+        assert!(err.contains("symlink"), "unexpected error message: {err}");
+
+        let err = write_file(&root, "app/models/x.ts", "// nope")
+            .expect_err("a deeper path through the same link must be refused");
+        assert!(err.contains("symlink"), "unexpected error message: {err}");
+
+        assert_eq!(
+            fs::read_dir(&outside).unwrap().count(),
+            0,
+            "nothing may be written or created outside the root"
+        );
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     /// O_EXCL: a pre-existing regular file (no symlink, no hardlink, just
