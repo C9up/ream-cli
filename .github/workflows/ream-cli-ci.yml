@@ -110,7 +110,14 @@ jobs:
             echo "::error::Tag $tag does not match Cargo.toml $cargo_tag — refuse to publish from a drifted tag"
             exit 1
           fi
-          echo "Tag gate passed: $tag == $cargo_tag"
+          # The tagged commit is the one `main` holds: a dispatch from another
+          # branch, or a tag on a commit main never received, would publish
+          # code the push CI on main has not seen.
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::HEAD $(git rev-parse --short HEAD) ($tag) is not on origin/main — refuse to publish a commit main does not hold"
+            exit 1
+          fi
+          echo "Tag gate passed: $tag == $cargo_tag, on origin/main"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Drift fail-closed gate
@@ -228,6 +235,7 @@ jobs:
     permissions:
       # write, not read: the release step needs to create one.
       contents: write
+      # The OIDC token npm signs the provenance with.
       id-token: write
     steps:
       - name: Verify NPM_TOKEN secret
@@ -251,7 +259,13 @@ jobs:
           node-version: '24'
           registry-url: https://registry.npmjs.org
 
-      # Create platform-specific packages
+      # Create platform-specific packages.
+      #
+      # Every package.json written here carries `publishConfig.provenance`, so
+      # each version is signed with the run that built it, and the same files
+      # published from anywhere but this workflow fail instead of going out
+      # unsigned: npm has no provenance provider outside CI. `repository` is
+      # what npm matches the signature against.
       - name: Package binaries
         env:
           TAG: ${{ needs.gates.outputs.tag }}
@@ -281,7 +295,9 @@ jobs:
             "version": "${VERSION}",
             "os": ["${platform%%-*}"],
             "cpu": ["${platform##*-}"],
-            "bin": { "ream": "./${BINARY}" }
+            "bin": { "ream": "./${BINARY}" },
+            "repository": { "type": "git", "url": "git+https://github.com/C9up/ream-cli.git" },
+            "publishConfig": { "access": "public", "provenance": true }
           }
           PKGEOF
 
@@ -307,6 +323,8 @@ jobs:
             "version": "${VERSION}",
             "description": "Ream CLI — Rust-native command-line tool",
             "bin": { "ream": "bin/ream" },
+            "repository": { "type": "git", "url": "git+https://github.com/C9up/ream-cli.git" },
+            "publishConfig": { "access": "public", "provenance": true },
             "optionalDependencies": {
               "@c9up/ream-cli-linux-x64": "${VERSION}",
               "@c9up/ream-cli-linux-arm64": "${VERSION}",
