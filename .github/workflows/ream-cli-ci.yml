@@ -50,15 +50,18 @@ jobs:
         with:
           node-version: '24'
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test -p ream-cli
+      # --locked everywhere: a Cargo.toml edit that drifts from Cargo.lock fails
+      # here instead of being re-resolved on the runner, so what is tested and
+      # published is the dependency set the repository records.
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked -p ream-cli
       # `ream new` end to end: scaffold, install from the registry, run the
       # project's own suites. pnpm 11+ because that is the line that refuses an
       # unapproved build script — the failure this test exists to catch.
       - uses: pnpm/action-setup@v6
         with: { version: 12 }
-      - run: cargo test -p ream-cli --test new_test -- --ignored
-      - run: cargo build --release -p ream-cli
+      - run: cargo test --locked -p ream-cli --test new_test -- --ignored
+      - run: cargo build --locked --release -p ream-cli
 
   # win32-x64 is a published target, and the package managers there are `.cmd`
   # shims that Rust's `Command` does not find on its own. Scoped to the program
@@ -71,8 +74,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: 'cargo test -p ream-cli --bin ream tools::'
-      - run: cargo test -p ream-cli --test new_test
+      - run: 'cargo test --locked -p ream-cli --bin ream tools::'
+      - run: cargo test --locked -p ream-cli --test new_test
 
   gates:
     name: Publish gates (tag + drift)
@@ -216,7 +219,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --target ${{ matrix.target }} -p ream-cli
+      - run: cargo build --locked --release --target ${{ matrix.target }} -p ream-cli
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.npm-pkg }}
@@ -269,7 +272,6 @@ jobs:
       - name: Package binaries
         env:
           TAG: ${{ needs.gates.outputs.tag }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [ -z "$TAG" ]; then
             echo "::error::TAG output from gates job is empty — refusing to publish with VERSION=\"\""
@@ -302,14 +304,12 @@ jobs:
           PKGEOF
 
             cp README.md "npm/${PKG}/README.md"
-            cd "npm/${PKG}" && npm publish --access public && cd ../..
           done
 
-      # Publish the main wrapper package
-      - name: Publish @c9up/ream-cli
+      # The wrapper, pinning the five platform packages at the exact version.
+      - name: Package @c9up/ream-cli
         env:
           TAG: ${{ needs.gates.outputs.tag }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [ -z "$TAG" ]; then
             echo "::error::TAG output from gates job is empty — refusing to publish with VERSION=\"\""
@@ -372,7 +372,31 @@ jobs:
           chmod +x npm/ream-cli/bin/ream
           cp README.md npm/ream-cli/README.md
 
-          cd npm/ream-cli && npm publish --access public
+      # npm has no multi-package transaction and a published version cannot be
+      # taken back, so whatever can be refused is made to be refused before the
+      # first real publish: all six packages are packed and checked first, and
+      # one that fails leaves the registry untouched instead of holding a
+      # version with some platforms missing.
+      - name: Dry-run every package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for dir in npm/ream-cli-linux-x64 npm/ream-cli-linux-arm64 npm/ream-cli-darwin-x64 npm/ream-cli-darwin-arm64 npm/ream-cli-win32-x64 npm/ream-cli; do
+            (cd "$dir" && npm publish --dry-run)
+          done
+
+      # The platform packages first and the wrapper last: until the wrapper is
+      # out, nothing installs the new version, so a failure in between strands
+      # no user on a wrapper whose binaries are missing.
+      - name: Publish the six packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for dir in npm/ream-cli-linux-x64 npm/ream-cli-linux-arm64 npm/ream-cli-darwin-x64 npm/ream-cli-darwin-arm64 npm/ream-cli-win32-x64 npm/ream-cli; do
+            (cd "$dir" && npm publish)
+          done
       - name: Create the GitHub release
         # Notes from the commits this tag contains. Without it a published
         # version arrives with no explanation of what changed, and the only way
