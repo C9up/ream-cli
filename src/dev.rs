@@ -17,7 +17,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Child, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -30,6 +30,276 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// down. Slower than [`POLL_INTERVAL`] because it walks the project — and it
 /// only ever runs while there is nothing left to serve.
 const RESCAN_INTERVAL: Duration = Duration::from_millis(300);
+
+/// How long a process being stopped is given to finish on its own before
+/// what is left of its process group is killed. Five seconds, as the spawner
+/// upstream's dev server goes through waits before its own forced kill.
+const STOP_GRACE: Duration = Duration::from_secs(5);
+
+/// A signal number. Windows has none to deliver; the type keeps the callers
+/// free of `cfg`.
+#[cfg(unix)]
+type Signal = libc::c_int;
+#[cfg(not(unix))]
+type Signal = i32;
+
+#[cfg(unix)]
+const SIGTERM: Signal = libc::SIGTERM;
+#[cfg(not(unix))]
+const SIGTERM: Signal = 15;
+
+/// The signals `ream dev` answers itself.
+///
+/// Every supervised child runs in its own process group (see [`supervised`]),
+/// so a stop can reach what that child started in turn. The price is that the
+/// terminal's Ctrl-C and Ctrl-Z now reach `ream dev` alone, and a `kill`, a
+/// task runner's terminate, systemd or `docker stop` never reached the
+/// children anyway: whatever arrives here is passed on from here. Before
+/// this, a SIGTERM to `ream dev` ended it on the spot and left the server
+/// holding its port.
+#[cfg(unix)]
+mod signals {
+    use super::Signal;
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+
+    static STOP: AtomicI32 = AtomicI32::new(0);
+    static SUSPEND: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn record(signal: libc::c_int) {
+        if signal == libc::SIGTSTP {
+            SUSPEND.store(true, Ordering::SeqCst);
+        } else {
+            STOP.store(signal, Ordering::SeqCst);
+        }
+    }
+
+    pub fn install() {
+        let handler: extern "C" fn(libc::c_int) = record;
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGTSTP] {
+            // SAFETY: `record` only stores into atomics, which is
+            // async-signal-safe, and the action is fully initialised before
+            // the call. SA_RESTART keeps the output pumps' reads going.
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = handler as libc::sighandler_t;
+                action.sa_flags = libc::SA_RESTART;
+                libc::sigemptyset(&mut action.sa_mask);
+                libc::sigaction(signal, &action, std::ptr::null_mut());
+            }
+        }
+    }
+
+    /// The stop signal received since the last look, if any.
+    pub fn take_stop() -> Option<Signal> {
+        match STOP.swap(0, Ordering::SeqCst) {
+            0 => None,
+            signal => Some(signal),
+        }
+    }
+
+    /// Whether Ctrl-Z was pressed since the last look.
+    pub fn take_suspend() -> bool {
+        SUSPEND.swap(false, Ordering::SeqCst)
+    }
+
+    /// End `ream dev` the way the signal would have, once the children are
+    /// gone: whoever started it sees the signal rather than an exit code, and
+    /// a shell loop running it stops on Ctrl-C as it would for any program.
+    pub fn die_by(signal: Signal) -> ! {
+        // SAFETY: restoring the default action and raising it on ourselves.
+        unsafe {
+            libc::signal(signal, libc::SIG_DFL);
+            libc::raise(signal);
+        }
+        std::process::exit(128 + signal)
+    }
+
+    /// Ctrl-Z: the children are suspended with `ream dev`, and resumed with
+    /// it by `fg` or `bg`, as they were when they shared its process group.
+    pub fn suspend(groups: &[u32]) {
+        let groups: Vec<libc::pid_t> = groups
+            .iter()
+            .filter_map(|id| libc::pid_t::try_from(*id).ok())
+            .collect();
+        for group in &groups {
+            // SAFETY: a plain syscall on a group this process leads the
+            // leader of.
+            unsafe { libc::killpg(*group, libc::SIGTSTP) };
+        }
+        // SAFETY: stops this process until a SIGCONT.
+        unsafe { libc::raise(libc::SIGSTOP) };
+        for group in &groups {
+            // SAFETY: as above.
+            unsafe { libc::killpg(*group, libc::SIGCONT) };
+        }
+    }
+}
+
+/// Windows delivers Ctrl-C to every process attached to the console, the
+/// children included, so there is nothing to pass on.
+#[cfg(not(unix))]
+mod signals {
+    use super::Signal;
+
+    pub fn install() {}
+
+    pub fn take_stop() -> Option<Signal> {
+        None
+    }
+
+    pub fn take_suspend() -> bool {
+        false
+    }
+
+    pub fn die_by(signal: Signal) -> ! {
+        std::process::exit(128 + signal)
+    }
+
+    pub fn suspend(_groups: &[u32]) {}
+}
+
+/// Start answering SIGINT, SIGTERM, SIGHUP and SIGTSTP. `ream dev` calls it
+/// before its first child; nothing else in the binary supervises children.
+pub fn install_signal_handlers() {
+    signals::install();
+}
+
+/// Set up a child `ream dev` supervises.
+///
+/// - Its own process group, so a stop reaches what it started: `pnpm
+///   css:watch` is pnpm AND the watcher it runs, and a signal to pnpm alone
+///   left the watcher behind.
+/// - No stdin: a process outside the terminal's foreground group that reads
+///   it is stopped by the kernel (SIGTTIN), which looks like a hang.
+/// - On Linux, SIGTERM when `ream dev` dies without a chance to clean up
+///   (SIGKILL, the OOM killer), so the server does not keep its port.
+fn supervised(command: &mut Command) -> &mut Command {
+    command.stdin(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        #[cfg(target_os = "linux")]
+        {
+            let parent = std::process::id();
+            // SAFETY: between fork and exec only async-signal-safe calls run:
+            // prctl, getppid and raise.
+            unsafe {
+                command.pre_exec(move || {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                    // The parent may already be gone, and then nothing will
+                    // ever send the death signal.
+                    if u32::try_from(libc::getppid()).ok() != Some(parent) {
+                        libc::raise(libc::SIGTERM);
+                    }
+                    Ok(())
+                });
+            }
+        }
+    }
+    command
+}
+
+/// Whether anything is left in the process group `group` leads or led.
+#[cfg(unix)]
+fn group_alive(group: libc::pid_t) -> bool {
+    // SAFETY: signal 0 only checks that the group exists.
+    unsafe { libc::killpg(group, 0) == 0 }
+}
+
+/// Stop supervised children and everything they started.
+///
+/// `signal` goes to each child's whole process group, then they get
+/// [`STOP_GRACE`] to finish — a server closing its connections, a watcher
+/// flushing its output — and whatever is still in a group after that is
+/// killed. Killing the child alone (SIGKILL, which nothing can pass on) left
+/// the real watcher behind `pnpm css:watch` running, holding its output file
+/// and, for a dev server, its port.
+fn stop_children(children: &mut [&mut Child], signal: Signal) {
+    #[cfg(unix)]
+    {
+        let groups: Vec<Option<libc::pid_t>> = children
+            .iter()
+            .map(|child| libc::pid_t::try_from(child.id()).ok())
+            .collect();
+        for group in groups.iter().flatten() {
+            // A leader that was already reaped no longer pins its group id;
+            // a group with nobody left in it is not signalled at all.
+            if group_alive(*group) {
+                // SAFETY: a plain syscall on the group this child leads.
+                unsafe { libc::killpg(*group, signal) };
+            }
+        }
+        let deadline = Instant::now() + STOP_GRACE;
+        let mut exited = vec![false; children.len()];
+        loop {
+            for (index, child) in children.iter_mut().enumerate() {
+                if !exited[index] {
+                    exited[index] = !matches!(child.try_wait(), Ok(None));
+                }
+            }
+            let left: Vec<libc::pid_t> = groups
+                .iter()
+                .zip(&exited)
+                .filter_map(|(group, exited)| match group {
+                    Some(group) if !*exited || group_alive(*group) => Some(*group),
+                    _ => None,
+                })
+                .collect();
+            if left.is_empty() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                for group in left {
+                    // SAFETY: as above; these groups still have members, so
+                    // their ids cannot have been reused.
+                    unsafe { libc::killpg(group, libc::SIGKILL) };
+                }
+                break;
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = signal;
+    for child in children.iter_mut() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// Run one supervised command on the terminal's output until it exits.
+///
+/// The plain `ream dev`, with no assets command beside the server. A signal
+/// to `ream dev` is passed on to the server's group, and `ream dev` ends by
+/// the same signal once the server is gone.
+pub fn run_attached(command: &str, args: &[&str]) -> Result<ExitStatus, String> {
+    let mut child = supervised(
+        crate::tools::command(command)
+            .args(args)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit()),
+    )
+    .spawn()
+    .map_err(|e| format!("Failed to run '{command}': {e}"))?;
+    loop {
+        if signals::take_suspend() {
+            signals::suspend(&[child.id()]);
+        }
+        if let Some(signal) = signals::take_stop() {
+            stop_children(&mut [&mut child], signal);
+            signals::die_by(signal);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => thread::sleep(POLL_INTERVAL),
+            Err(e) => {
+                stop_children(&mut [&mut child], SIGTERM);
+                return Err(format!("Failed to wait for '{command}': {e}"));
+            }
+        }
+    }
+}
 
 /// The project directories `ream dev` watches, when they exist.
 ///
@@ -285,6 +555,14 @@ pub fn crash_notice(code: i32) -> String {
 pub fn wait_for_change(dirs: &[String]) {
     let baseline = snapshot(dirs);
     while snapshot(dirs) == baseline {
+        // Nothing is running while this waits, so a stop ends `ream dev`
+        // here: with the handlers installed, Ctrl-C no longer would by itself.
+        if signals::take_suspend() {
+            signals::suspend(&[]);
+        }
+        if let Some(signal) = signals::take_stop() {
+            signals::die_by(signal);
+        }
         thread::sleep(RESCAN_INTERVAL);
     }
 }
@@ -344,6 +622,24 @@ pub fn run_together(processes: Vec<Process>, watch_dirs: &[&str]) -> Result<(), 
     // has to put a NEW child into the same slot, and a thread that has already
     // reported its child's exit cannot do that.
     let outcome: (String, i32, Option<String>) = 'supervise: loop {
+        if signals::take_suspend() {
+            let ids: Vec<u32> = shared
+                .iter()
+                .filter_map(|(_, child)| child.lock().ok().map(|c| c.id()))
+                .collect();
+            signals::suspend(&ids);
+        }
+        // Asked to stop from outside: every child gets the same signal, and
+        // `ream dev` ends by it once they are gone.
+        if let Some(signal) = signals::take_stop() {
+            let mut guards: Vec<_> = shared
+                .iter()
+                .filter_map(|(_, child)| child.lock().ok())
+                .collect();
+            let mut children: Vec<&mut Child> = guards.iter_mut().map(|g| &mut **g).collect();
+            stop_children(&mut children, signal);
+            signals::die_by(signal);
+        }
         for (index, (label, child)) in shared.iter().enumerate() {
             // Already reaped and waiting for an edit: `try_wait` would hand
             // back the same exit on every poll.
@@ -417,16 +713,15 @@ pub fn run_together(processes: Vec<Process>, watch_dirs: &[&str]) -> Result<(), 
     let (finished, code, spawn_error) = outcome;
 
     // Stop the rest — the whole point of running them together. A watcher left
-    // behind keeps writing to the output file after the server is gone.
-    for (label, child) in &shared {
-        if *label == finished {
-            continue;
-        }
-        if let Ok(mut child) = child.lock() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
+    // behind keeps writing to the output file after the server is gone. The
+    // one that finished is in the list too: it is reaped already, but what it
+    // started may still be running in its group.
+    let mut guards: Vec<_> = shared
+        .iter()
+        .filter_map(|(_, child)| child.lock().ok())
+        .collect();
+    let mut children: Vec<&mut Child> = guards.iter_mut().map(|g| &mut **g).collect();
+    stop_children(&mut children, SIGTERM);
 
     if let Some(message) = spawn_error {
         return Err(message);
@@ -444,13 +739,15 @@ pub fn run_together(processes: Vec<Process>, watch_dirs: &[&str]) -> Result<(), 
 /// pumps included: a replacement whose streams are not pumped is a server whose
 /// output silently stops after the first hot reload.
 fn spawn_piped(spec: &CommandSpec, prefix: &str) -> Result<Child, String> {
-    let mut child = crate::tools::command(&spec.command)
-        .args(&spec.args)
-        .env("FORCE_COLOR", "1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to start `{}`: {e}", spec.command))?;
+    let mut child = supervised(
+        crate::tools::command(&spec.command)
+            .args(&spec.args)
+            .env("FORCE_COLOR", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .spawn()
+    .map_err(|e| format!("failed to start `{}`: {e}", spec.command))?;
     if let Some(stdout) = child.stdout.take() {
         pump(stdout, prefix.to_string(), false);
     }
@@ -465,10 +762,8 @@ fn spawn_piped(spec: &CommandSpec, prefix: &str) -> Result<Child, String> {
 /// Used when a later process cannot start: the ones already running are this
 /// function's to clean up, and nothing else will.
 fn stop_all(children: &mut Vec<(String, Child)>) {
-    for (_, child) in children.iter_mut() {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
+    let mut started: Vec<&mut Child> = children.iter_mut().map(|(_, child)| child).collect();
+    stop_children(&mut started, SIGTERM);
     children.clear();
 }
 
@@ -702,6 +997,110 @@ mod tests {
 
         assert!(error.contains("assets"), "{error}");
         assert!(error.contains("3"), "{error}");
+    }
+
+    /// Whether a process is gone, given a moment to be reaped: a killed
+    /// grandchild is reparented and reaped by init, not by this process.
+    #[cfg(unix)]
+    fn gone_within(pid: libc::pid_t, wait: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            // SAFETY: signal 0 only checks that the process exists.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// What `pnpm css:watch` is: an intermediate process and the watcher it
+    /// runs. Stopping the survivor has to reach the watcher too; SIGKILL on
+    /// the intermediate alone left it running, reparented, until killed by
+    /// hand.
+    #[cfg(unix)]
+    #[test]
+    fn stopping_the_survivor_reaches_what_it_started() {
+        let dir = scratch(line!());
+        let pid_file = dir.join("watcher.pid");
+        let script = format!(
+            "sleep 30 & echo $! > {}; wait",
+            pid_file.to_str().expect("a utf-8 temp path")
+        );
+        let result = run_together_no_recovery(vec![
+            Process {
+                label: "server".to_string(),
+                colour: COLOURS[0],
+                restartable: false,
+                spec: CommandSpec {
+                    command: "sh".to_string(),
+                    // Long enough for the watcher to have written its pid.
+                    args: vec!["-c".to_string(), "sleep 1".to_string()],
+                },
+            },
+            Process {
+                label: "assets".to_string(),
+                colour: COLOURS[1],
+                restartable: false,
+                spec: CommandSpec {
+                    command: "sh".to_string(),
+                    args: vec!["-c".to_string(), script],
+                },
+            },
+        ]);
+        assert!(result.is_ok(), "{result:?}");
+
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .expect("the watcher wrote its pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        let gone = gone_within(pid, std::time::Duration::from_secs(3));
+        if !gone {
+            // SAFETY: cleaning up the orphan this test just proved exists.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(gone, "the watcher outlived the process that started it");
+    }
+
+    /// Stopped, not killed: the survivor gets SIGTERM and the time to act on
+    /// it — a watcher flushing its output, a server closing its connections.
+    #[cfg(unix)]
+    #[test]
+    fn the_survivor_is_given_the_chance_to_stop_cleanly() {
+        let dir = scratch(line!());
+        let marker = dir.join("stopped");
+        let script = format!(
+            "trap 'printf clean > {}; exit 0' TERM; sleep 30 & wait",
+            marker.to_str().expect("a utf-8 temp path")
+        );
+        let result = run_together_no_recovery(vec![
+            Process {
+                label: "server".to_string(),
+                colour: COLOURS[0],
+                restartable: false,
+                spec: CommandSpec {
+                    command: "sh".to_string(),
+                    args: vec!["-c".to_string(), "sleep 1".to_string()],
+                },
+            },
+            Process {
+                label: "assets".to_string(),
+                colour: COLOURS[1],
+                restartable: false,
+                spec: CommandSpec {
+                    command: "sh".to_string(),
+                    args: vec!["-c".to_string(), script],
+                },
+            },
+        ]);
+        assert!(result.is_ok(), "{result:?}");
+        let stopped = std::fs::read_to_string(&marker).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(stopped, "clean", "the survivor was killed, not stopped");
     }
 
     /// The reason the two run together, in the failure direction.

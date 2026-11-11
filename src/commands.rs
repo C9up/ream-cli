@@ -410,6 +410,9 @@ pub fn run_dev(clear_screen: bool, assets_flags: &crate::dev::AssetsFlags) -> Re
 
     let assets = read_assets_config()?;
     assets_flags.warn_if_unused(assets.dev_server.as_ref(), "devServer");
+    // From here on a signal to `ream dev` is passed on to its children rather
+    // than ending it and leaving them running.
+    crate::dev::install_signal_handlers();
     let Some(watcher) = assets_flags.apply(assets.dev_server) else {
         // Nothing to run alongside: keep the plain path, where the server owns
         // the terminal and its output is not piped through a prefix.
@@ -423,7 +426,7 @@ pub fn run_dev(clear_screen: bool, assets_flags: &crate::dev::AssetsFlags) -> Re
             &env_files_in(std::path::Path::new(".")),
         );
         loop {
-            let status = inherited_status("node", &refs)?;
+            let status = crate::dev::run_attached("node", &refs)?;
             match status.code() {
                 Some(crate::dev::EXIT_RESTART) => continue,
                 // Exit 0 is a session that ENDED: it is how the graceful

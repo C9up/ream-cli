@@ -89,7 +89,7 @@ export default {
 }
 ```
 
-Output is line-prefixed per process, and when one stops the other is stopped with it — a Ctrl-C leaves no orphan watcher holding the output file. Without this, an app ends up wiring `concurrently -k` itself.
+Output is line-prefixed per process, and when one stops the other is stopped with it, together with whatever it started: `pnpm css:watch` is pnpm and the watcher behind it, and both go. A stop is a SIGTERM to the process group, then a SIGKILL for anything still there five seconds later. A Ctrl-C, or a `kill`, `docker stop` or task-runner terminate sent to `ream dev` itself, is passed on the same way, so none of them leaves an orphan watcher holding the output file or a server holding its port. Without this, an app ends up wiring `concurrently -k` itself.
 
 Both keys are optional: with no `assets`, `ream dev` and `ream build` behave exactly as before.
 
