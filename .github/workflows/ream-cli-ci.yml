@@ -7,7 +7,9 @@
 # when someone released; that reason survives here, as the `check` job below,
 # which still runs on every push.
 #
-# The publish jobs are gated on `workflow_dispatch`, and the concurrency group
+# The publish jobs are gated on `workflow_dispatch` and wait for every
+# verification job (`scripts/check-publish-gates.mjs` at the monorepo root
+# checks both), and the concurrency group
 # carries `github.event_name` so a push can never cancel a release in flight.
 
 name: ream-cli-ci
@@ -160,17 +162,8 @@ jobs:
             echo "Drift gate passed: local $local_v > registry $npm_v"
           fi
 
-      # Quality gate — a publish must not ship code that fails fmt / clippy /
-      # tests, not only code that compiles. build + publish both `needs: [gates]`.
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Rust quality gate (fmt + clippy + tests)
-        run: |
-          cargo fmt --check
-          cargo clippy --all-targets -- -D warnings
-          cargo test -p ream-cli
+      # fmt / clippy / tests are not repeated here: `check` and `check-windows`
+      # run on the dispatch too, and `publish` waits for both.
 
       # `ream new` writes a caret per package, and on 0.x a caret is a ceiling:
       # a pin left behind scaffolds apps against the line before the one being
@@ -182,6 +175,9 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     needs: [gates]
+    # Stated, not only inherited from `gates`: an `if: always()` added here
+    # later must not turn a push into a build feeding a publish.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -220,7 +216,13 @@ jobs:
           path: target/${{ matrix.target }}/release/${{ matrix.binary }}
 
   publish:
-    needs: [build, gates]
+    # Every job that verifies something, not only the ones on the build path:
+    # `check` carries the end-to-end `ream new` and `check-windows` the only
+    # verification of the win32-x64 package that goes out with the others.
+    # Leaving one out ran it side by side with the publish, which shipped
+    # whatever it found.
+    needs: [build, gates, check, check-windows]
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
