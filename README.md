@@ -93,6 +93,13 @@ Output is line-prefixed per process, and when one stops the other is stopped wit
 
 Both keys are optional: with no `assets`, `ream dev` and `ream build` behave exactly as before.
 
+For one run, `--no-assets` leaves the assets command out, and `--assets-args` appends an argument to it (one per flag, repeat it for several):
+
+```bash
+ream dev --no-assets
+ream build --assets-args --minify --assets-args=--base=/public
+```
+
 ## License
 
 MIT

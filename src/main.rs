@@ -47,6 +47,26 @@ enum McpAction {
     Status,
 }
 
+/// `--no-assets` / `--assets-args`, shared by `dev` and `build`.
+#[derive(clap::Args)]
+struct AssetsArgs {
+    /// Leave the assets command declared in reamrc.ts out of this run
+    #[arg(long = "no-assets")]
+    no_assets: bool,
+    /// An argument appended to the assets command (repeat the flag for several)
+    #[arg(long = "assets-args", value_name = "ARG", allow_hyphen_values = true)]
+    assets_args: Vec<String>,
+}
+
+impl AssetsArgs {
+    fn into_flags(self) -> dev::AssetsFlags {
+        dev::AssetsFlags {
+            disabled: self.no_assets,
+            extra_args: self.assets_args,
+        }
+    }
+}
+
 /// `ream test`'s arguments, boxed in [`Commands::Test`] to keep the enum small.
 #[derive(clap::Args)]
 struct TestArgs {
@@ -163,9 +183,11 @@ enum Commands {
 
     /// Start development server — hot-reloads through hot-hook when the project has it, otherwise node --watch
     Dev {
-        /// Keep the previous logs on screen after a change (`ace serve --no-clear`)
+        /// Keep the previous logs on screen after a change
         #[arg(long = "no-clear", action = clap::ArgAction::SetTrue)]
         no_clear: bool,
+        #[command(flatten)]
+        assets: AssetsArgs,
     },
 
     /// Start production server (spawns node)
@@ -179,6 +201,8 @@ enum Commands {
         /// The tsconfig file to compile with (default: tsconfig.json)
         #[arg(long, value_name = "PATH")]
         tsconfig: Option<String>,
+        #[command(flatten)]
+        assets: AssetsArgs,
     },
 
     /// Run the test suites declared in reamrc.ts (`tests` block)
@@ -466,14 +490,16 @@ fn main() {
             force,
             package_manager,
         } => add::split_add_args(&args, dev, force, package_manager).and_then(|request| add::run(&request)),
-        Commands::Dev { no_clear } => commands::run_dev(!no_clear),
+        Commands::Dev { no_clear, assets } => commands::run_dev(!no_clear, &assets.into_flags()),
         Commands::Start => commands::run_start(),
         Commands::Build {
             ignore_ts_errors,
             tsconfig,
+            assets,
         } => commands::run_build(&commands::BuildOptions {
             ignore_ts_errors,
             tsconfig: tsconfig.as_deref(),
+            assets: assets.into_flags(),
         }),
         Commands::Test(args) => {
             let TestArgs {
@@ -659,6 +685,31 @@ mod dispatch_tests {
                 assert!(failed && watch && poll && no_clear);
             }
             _ => panic!("`test` must parse as the native test command"),
+        }
+    }
+
+    #[test]
+    fn dev_and_build_take_the_assets_switches() {
+        match command_for(&["dev", "--no-assets", "--assets-args", "--host"]) {
+            Commands::Dev { assets, .. } => {
+                let flags = assets.into_flags();
+                assert!(flags.disabled);
+                assert_eq!(flags.extra_args, ["--host"]);
+            }
+            _ => panic!("`dev` must parse as the native dev command"),
+        }
+        match command_for(&[
+            "build",
+            "--assets-args",
+            "--debug",
+            "--assets-args=--base=/public",
+        ]) {
+            Commands::Build { assets, .. } => {
+                let flags = assets.into_flags();
+                assert!(!flags.disabled);
+                assert_eq!(flags.extra_args, ["--debug", "--base=/public"]);
+            }
+            _ => panic!("`build` must parse as the native build command"),
         }
     }
 

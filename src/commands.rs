@@ -388,9 +388,9 @@ pub fn read_assets_config() -> Result<crate::dev::AssetsConfig, String> {
 }
 
 /// `ream dev` — the server, plus whatever the rc file says builds the assets.
-pub fn run_dev(clear_screen: bool) -> Result<(), String> {
-    // The child clears the terminal before it restarts, the way `ace serve`
-    // does; `--no-clear` says not to. Passed as an environment variable
+pub fn run_dev(clear_screen: bool, assets_flags: &crate::dev::AssetsFlags) -> Result<(), String> {
+    // The child clears the terminal before it restarts, as the console's
+    // dev server does; `--no-clear` says not to. Passed as an environment variable
     // because the flag belongs to this process and the decision belongs to
     // the loader running inside node.
     if !clear_screen {
@@ -409,7 +409,8 @@ pub fn run_dev(clear_screen: bool) -> Result<(), String> {
     require_ts_loader()?;
 
     let assets = read_assets_config()?;
-    let Some(watcher) = assets.dev_server else {
+    assets_flags.warn_if_unused(assets.dev_server.as_ref(), "devServer");
+    let Some(watcher) = assets_flags.apply(assets.dev_server) else {
         // Nothing to run alongside: keep the plain path, where the server owns
         // the terminal and its output is not piped through a prefix.
         let args = dev_args();
@@ -486,6 +487,8 @@ pub struct BuildOptions<'a> {
     pub ignore_ts_errors: bool,
     /// The tsconfig to compile with, instead of `tsconfig.json`.
     pub tsconfig: Option<&'a str>,
+    /// `--no-assets` / `--assets-args`, applied to `assets.build`.
+    pub assets: crate::dev::AssetsFlags,
 }
 
 pub fn run_build(options: &BuildOptions<'_>) -> Result<(), String> {
@@ -515,7 +518,10 @@ pub fn run_build(options: &BuildOptions<'_>) -> Result<(), String> {
         empty_build_output(dir)?;
     }
 
-    if let Some(build) = rc.assets.build {
+    options
+        .assets
+        .warn_if_unused(rc.assets.build.as_ref(), "build");
+    if let Some(build) = options.assets.apply(rc.assets.build) {
         let args: Vec<&str> = build.args.iter().map(String::as_str).collect();
         let status = inherited_status(&build.command, &args)?;
         if !status.success() {

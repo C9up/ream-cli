@@ -250,3 +250,60 @@ esac"#,
     // The outDir of THAT config is what was emptied.
     assert!(!p.exists("build/stale.js"));
 }
+
+/// A project whose rc file declares `assets.build`: the stand-in `node`
+/// answers the rc read with that block, and the stand-in bundler records the
+/// arguments it was started with.
+fn project_with_an_assets_build(label: &str) -> TempProject {
+    let p = TempProject::new(label);
+    p.write("reamrc.ts", "export default {}\n");
+    p.script(
+        "stubs/node",
+        r#"echo '{"assets":{"build":{"command":"bundle","args":["css"]}},"metaFiles":[]}'"#,
+    );
+    p.script(
+        "stubs/bundle",
+        r#"for arg in "$@"; do echo "[$arg]"; done >> "{root}/bundle.calls""#,
+    );
+    p.script(
+        "node_modules/.bin/tsc",
+        r#"case "$1" in
+  --showConfig) echo '{"compilerOptions":{"outDir":"./dist"}}' ;;
+  *) mkdir -p dist ;;
+esac"#,
+    );
+    p
+}
+
+#[test]
+fn assets_args_are_appended_to_the_rc_command_one_argument_each() {
+    let p = project_with_an_assets_build("assets-args");
+    let output = p.build(&[
+        "--assets-args",
+        "--minify",
+        "--assets-args=--base=/public",
+        "--assets-args",
+        "two words",
+    ]);
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(
+        p.read("bundle.calls"),
+        "[css]\n[--minify]\n[--base=/public]\n[two words]\n",
+        "{}",
+        text(&output)
+    );
+}
+
+#[test]
+fn no_assets_leaves_the_assets_build_out_of_the_run() {
+    let p = project_with_an_assets_build("no-assets");
+    let output = p.build(&["--no-assets"]);
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(
+        !p.exists("bundle.calls"),
+        "the assets build ran: {}",
+        p.read("bundle.calls")
+    );
+    // The TypeScript half of the build still happened.
+    assert!(p.exists("dist/package.json"), "{}", text(&output));
+}

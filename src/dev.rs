@@ -67,6 +67,39 @@ pub struct AssetsConfig {
     pub build: Option<CommandSpec>,
 }
 
+/// `--no-assets` and `--assets-args`, which `dev` and `build` both take.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AssetsFlags {
+    /// `--no-assets`: leave the rc file's assets command out of this run.
+    pub disabled: bool,
+    /// `--assets-args`: appended to the rc command's own arguments, one
+    /// argument per occurrence of the flag, never split on spaces.
+    pub extra_args: Vec<String>,
+}
+
+impl AssetsFlags {
+    /// The rc file's command as this run starts it: none under `--no-assets`,
+    /// otherwise its own arguments followed by the `--assets-args` ones.
+    pub fn apply(&self, declared: Option<CommandSpec>) -> Option<CommandSpec> {
+        if self.disabled {
+            return None;
+        }
+        let mut spec = declared?;
+        spec.args.extend(self.extra_args.iter().cloned());
+        Some(spec)
+    }
+
+    /// Arguments given for a command the rc file does not declare are
+    /// arguments nothing will receive; said rather than dropped in silence.
+    pub fn warn_if_unused(&self, declared: Option<&CommandSpec>, key: &str) {
+        if !self.disabled && declared.is_none() && !self.extra_args.is_empty() {
+            crate::ui::warning(&format!(
+                "--assets-args ignored: reamrc.ts declares no `assets.{key}` command"
+            ));
+        }
+    }
+}
+
 /// Read `assets` out of the JSON the rc-reading script prints.
 pub fn parse_assets(raw: &str) -> Result<AssetsConfig, String> {
     let trimmed = raw.trim();
@@ -456,6 +489,41 @@ fn pump<R: std::io::Read + Send + 'static>(stream: R, prefix: String, to_stderr:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spec(command: &str, args: &[&str]) -> CommandSpec {
+        CommandSpec {
+            command: command.to_string(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn assets_args_follow_the_rc_commands_own_arguments() {
+        let flags = AssetsFlags {
+            disabled: false,
+            extra_args: vec!["--host".to_string(), "two words".to_string()],
+        };
+        assert_eq!(
+            flags.apply(Some(spec("pnpm", &["css:watch"]))),
+            Some(spec("pnpm", &["css:watch", "--host", "two words"]))
+        );
+    }
+
+    #[test]
+    fn no_assets_drops_the_rc_command_whatever_args_came_with_it() {
+        let flags = AssetsFlags {
+            disabled: true,
+            extra_args: vec!["--host".to_string()],
+        };
+        assert_eq!(flags.apply(Some(spec("pnpm", &["css:watch"]))), None);
+    }
+
+    #[test]
+    fn without_flags_the_rc_command_is_started_as_declared() {
+        let declared = Some(spec("vite", &[]));
+        assert_eq!(AssetsFlags::default().apply(declared.clone()), declared);
+        assert_eq!(AssetsFlags::default().apply(None), None);
+    }
 
     /// `run_together` with a crash still fatal — what every test wrote before
     /// crash recovery existed, and what most of them still mean.
