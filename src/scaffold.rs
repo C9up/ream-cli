@@ -3,7 +3,7 @@
 use dialoguer::Select;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// What `ream new` was told on the command line.
 ///
@@ -80,6 +80,46 @@ fn existing_empty_dir(target: &Path, shown: &str) -> Result<bool, String> {
     }
 }
 
+/// Take the empty directory `ream new` decided to fill, once the prompts are
+/// answered, and return its canonical path.
+///
+/// `existing_empty_dir` ran before the prompts, and whoever can write where
+/// `target` lives had the whole prompt window: to swap it for a link, or to
+/// drop an `.npmrc` / `.pnpmfile.cjs` into it that the install then honours
+/// and runs. So it is checked again here, after the prompts, and on Unix it
+/// must also belong to the user running ream and not be writable by every
+/// user: a directory only its owner can write to cannot be filled behind
+/// ream's back between this check and the install.
+fn claim_reused_dir(target: &Path, shown: &str) -> Result<PathBuf, String> {
+    if !existing_empty_dir(target, shown)? {
+        return Err(format!(
+            "'{shown}' disappeared while the prompts were open — refusing to scaffold"
+        ));
+    }
+    let canonical = fs::canonicalize(target)
+        .map_err(|e| format!("Failed to canonicalize project root '{shown}': {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::symlink_metadata(&canonical)
+            .map_err(|e| format!("Failed to inspect '{shown}': {e}"))?;
+        // SAFETY: geteuid takes no argument and cannot fail.
+        let uid = unsafe { libc::geteuid() };
+        if meta.uid() != uid {
+            return Err(format!(
+                "'{shown}' belongs to another user (uid {}) — refusing to scaffold and install into a directory someone else controls",
+                meta.uid()
+            ));
+        }
+        if meta.mode() & 0o002 != 0 {
+            return Err(format!(
+                "'{shown}' is writable by every user — refusing to scaffold and install into it; `chmod o-w` it first"
+            ));
+        }
+    }
+    Ok(canonical)
+}
+
 /// `ream new <destination>`: any path, as upstream's creator takes one —
 /// `apps/api` in a monorepo, `.` for the directory you stand in. The package
 /// is named after its last component.
@@ -126,27 +166,31 @@ pub fn run(destination: &str, options: &NewOptions<'_>) -> Result<(), String> {
     // the actual filesystem so every subsequent write_file() call is anchored
     // to the same canonical path — independent of the caller's CWD.
     //
-    // The parents are the user's path and are created as needed. The project
-    // directory itself is created atomically: `create_dir` (NOT `_all`) fails
-    // with `EEXIST` if anything already exists at `target` — file, dir, OR
-    // symlink. Closes the TOCTOU between the check above and the
-    // `canonicalize` below; without it, a co-resident attacker could plant a
-    // symlink in the prompt window and capture the entire scaffold. An empty
-    // directory the user named is filled in place, as upstream's creator does.
-    if !reuse {
+    // A new project directory: the parents are the user's path and are
+    // created as needed, and the directory itself atomically — `create_dir`
+    // (NOT `_all`) fails with `EEXIST` if anything already exists at `target`,
+    // file, dir OR symlink, so nothing planted in the prompt window survives.
+    //
+    // An empty directory the user named is filled in place, as upstream's
+    // creator does. There is no atomic step for that one: it existed before
+    // the prompts, so `claim_reused_dir` checks it again after them (still
+    // empty, still not a link, the user's own and not writable by everyone).
+    let root_canon = if reuse {
+        claim_reused_dir(&target, destination)?
+    } else {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create '{}': {}", parent.display(), e))?;
         }
         fs::create_dir(&target)
             .map_err(|e| format!("Failed to create '{}': {}", destination, e))?;
-    }
-    let root_canon = fs::canonicalize(&target).map_err(|e| {
-        format!(
-            "Failed to canonicalize project root '{}': {}",
-            destination, e
-        )
-    })?;
+        fs::canonicalize(&target).map_err(|e| {
+            format!(
+                "Failed to canonicalize project root '{}': {}",
+                destination, e
+            )
+        })?
+    };
     let root = root_canon.as_path();
 
     // Common files
@@ -999,6 +1043,59 @@ mod tests {
         );
         // No file was created anywhere we can observe.
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The empty directory `ream new` decided to fill is checked again once
+    /// the prompts are answered: what was planted in it, or swapped for it,
+    /// while they were open is refused.
+    #[test]
+    fn a_reused_directory_is_checked_again_after_the_prompts() {
+        let target = unique_root("reuse-planted");
+        assert!(existing_empty_dir(&target, "app").unwrap());
+        // Planted in the prompt window: pnpm would run it on install.
+        fs::write(target.join(".pnpmfile.cjs"), "module.exports = {}").unwrap();
+        let err = claim_reused_dir(&target, "app").expect_err("a planted file must be refused");
+        assert!(err.contains("not empty"), "unexpected error message: {err}");
+        let _ = fs::remove_dir_all(&target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reused_directory_swapped_for_a_link_is_refused() {
+        use std::os::unix::fs::symlink;
+        let base = unique_root("reuse-swapped");
+        let elsewhere = unique_root("reuse-swapped-elsewhere");
+        let target = base.join("app");
+        fs::create_dir(&target).unwrap();
+        assert!(existing_empty_dir(&target, "app").unwrap());
+        fs::remove_dir(&target).unwrap();
+        symlink(&elsewhere, &target).unwrap();
+        let err = claim_reused_dir(&target, "app").expect_err("a swapped link must be refused");
+        assert!(
+            err.contains("symbolic link"),
+            "unexpected error message: {err}"
+        );
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&elsewhere);
+    }
+
+    /// A directory every user may write to is one anyone can drop an
+    /// `.npmrc` or a `.pnpmfile.cjs` into before the install runs.
+    #[cfg(unix)]
+    #[test]
+    fn a_reused_directory_writable_by_everyone_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let target = unique_root("reuse-world-writable");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o777)).unwrap();
+        let err = claim_reused_dir(&target, "app").expect_err("a 0777 directory must be refused");
+        assert!(
+            err.contains("every user"),
+            "unexpected error message: {err}"
+        );
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let claimed = claim_reused_dir(&target, "app").unwrap();
+        assert_eq!(claimed, fs::canonicalize(&target).unwrap());
+        let _ = fs::remove_dir_all(&target);
     }
 
     /// `..` is refused, not stripped or resolved: a path that climbs out of
