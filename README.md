@@ -11,7 +11,9 @@ npm install -g @c9up/ream-cli
 ## Commands
 
 Run `ream --help` (or `ream <command> --help`) for the authoritative,
-always up-to-date list. What the binary itself defines:
+always up-to-date list. The generators and `eject` are the application's
+console commands (shipped by `@c9up/ream`), forwarded by the binary like any
+other; the rest is the binary's own:
 
 ```bash
 # Scaffolding
@@ -30,13 +32,13 @@ ream make:controller order Order      # app/order/OrderController.ts
 ream make:service order Payment       # app/order/PaymentService.ts
 ream make:entity order OrderItem      # app/order/OrderItem.ts
 ream make:validator order CreateOrder
-ream make:module order Order          # entity + controller + validator + migration
+ream make:module order Order          # entity + controller + validator
 ream make:provider Stripe
 ream make:command app:provision       # commands/app-provision.ts, discovered automatically
 ream make:middleware auth --stack router
 ream make:event orderShipped
 ream make:listener sendMail --event orderShipped
-ream stubs:publish controller         # copy a make: template into stubs/make/ to edit it
+ream eject make/controller.stub       # copy a make: template into stubs/make/ to edit it
 
 # Packages
 ream add @c9up/atlas                  # install a package AND run its configure() hook
