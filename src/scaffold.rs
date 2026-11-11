@@ -744,7 +744,28 @@ fn write_app_base(root: &Path, name: &str) -> Result<(), String> {
 
 fn write_api_template(root: &Path, name: &str) -> Result<(), String> {
     write_app_base(root, name)?;
-    write_file(root, "start/kernel.ts", "import server from '@c9up/ream/services/server'\n\nserver.use([\n  async (ctx, next) => {\n    const start = Date.now()\n    await next()\n    ctx.response.header('x-response-time', `${Date.now() - start}ms`)\n  },\n])\n")?;
+    // The body parser is what parses a request body: without it every JSON
+    // POST reads as `{}`. Router middleware, so it only runs for a matched
+    // route; its settings come from `config/bodyparser.ts` when the app adds one.
+    write_file(
+        root,
+        "start/kernel.ts",
+        r#"import router from '@c9up/ream/services/router'
+import server from '@c9up/ream/services/server'
+
+server.use([
+  async (ctx, next) => {
+    const start = Date.now()
+    await next()
+    ctx.response.header('x-response-time', `${Date.now() - start}ms`)
+  },
+])
+
+router.use([
+  () => import('@c9up/ream/bodyparser_middleware'),
+])
+"#,
+    )?;
     Ok(())
 }
 
@@ -887,7 +908,7 @@ fn write_slim_template(root: &Path, _name: &str) -> Result<(), String> {
     write_file(
         root,
         "bin/server.ts",
-        "import { Ignitor } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\n// The Ignitor reads PORT when it binds, which is after `booting()` has loaded\n// `.env`; reading it here would see only the shell's environment.\nconst app = new Ignitor({\n  serverFactory: createHyperServerFactory(),\n})\n  .tap((app) => {\n    // Validates the environment against start/env.ts before anything boots,\n    // so a missing APP_KEY stops the app here rather than on the first\n    // response that tries to sign a cookie.\n    app.booting(async () => {\n      await import('#start/env.js')\n    })\n  })\n  .httpServer()\n  .routes((router) => {\n    router.get('/', async ({ response }) => {\n      response.status(200).send('Hello from Ream!')\n    })\n  })\n\nawait app.start()\nconsole.log(`\\n  ➜ Ream ready on http://${app.host()}:${await app.port()}\\n`)\n",
+        "import { Ignitor } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\n// The Ignitor reads PORT when it binds, which is after `booting()` has loaded\n// `.env`; reading it here would see only the shell's environment.\nconst app = new Ignitor({\n  serverFactory: createHyperServerFactory(),\n})\n  .tap((app) => {\n    // Validates the environment against start/env.ts before anything boots,\n    // so a missing APP_KEY stops the app here rather than on the first\n    // response that tries to sign a cookie.\n    app.booting(async () => {\n      await import('#start/env.js')\n    })\n  })\n  .httpServer()\n  .routes((router) => {\n    // Parses request bodies: without it every JSON POST reads as `{}`.\n    router.use([\n      () => import('@c9up/ream/bodyparser_middleware'),\n    ])\n    router.get('/', async ({ response }) => {\n      response.status(200).send('Hello from Ream!')\n    })\n  })\n\nawait app.start()\nconsole.log(`\\n  ➜ Ream ready on http://${app.host()}:${await app.port()}\\n`)\n",
     )?;
     Ok(())
 }
@@ -1359,6 +1380,41 @@ mod tests {
             assert!(
                 bin.contains("await app.port()"),
                 "{template}: the banner must report the port that was BOUND — got:\n{bin}"
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    /// The body parser is the only thing that parses a request body: without
+    /// it, `request.body()` and `input()` read `{}` for every JSON POST. So
+    /// every template that serves HTTP registers it as router middleware —
+    /// api and web in their kernel, slim next to its inline routes.
+    #[test]
+    fn every_http_template_registers_the_body_parser() {
+        let entry = "() => import('@c9up/ream/bodyparser_middleware')";
+        for (template, file) in [
+            ("api", "start/kernel.ts"),
+            ("web", "start/kernel.ts"),
+            ("slim", "bin/server.ts"),
+        ] {
+            let root = unique_root(&format!("bodyparser-{template}"));
+            match template {
+                "api" => write_api_template(&root, "demo").unwrap(),
+                "web" => write_web_template(&root, "demo").unwrap(),
+                _ => write_slim_template(&root, "demo").unwrap(),
+            }
+            let source = fs::read_to_string(root.join(file)).unwrap();
+            let registered = source
+                .find("router.use([")
+                .and_then(|start| {
+                    source[start..]
+                        .find("])")
+                        .map(|end| &source[start..start + end])
+                })
+                .is_some_and(|block| block.contains(entry));
+            assert!(
+                registered,
+                "{template}: {file} must register {entry} in router.use([...]) — got:\n{source}"
             );
             let _ = fs::remove_dir_all(&root);
         }
