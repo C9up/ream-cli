@@ -939,6 +939,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_npm_spec_takes_an_unscoped_name_with_a_dot() {
+        let (bare, full) = parse_npm_spec("socket.io").unwrap();
+        assert_eq!((bare.as_str(), full.as_str()), ("socket.io", "socket.io"));
+
+        let (bare, full) = parse_npm_spec("lodash.merge@^4.6.2").unwrap();
+        assert_eq!(bare, "lodash.merge");
+        assert_eq!(full, "lodash.merge@^4.6.2");
+    }
+
+    #[test]
     fn parse_npm_spec_rejects_empty_input() {
         let err = parse_npm_spec("").unwrap_err();
         assert!(err.contains("Empty package spec"), "got: {}", err);

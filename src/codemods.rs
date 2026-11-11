@@ -63,34 +63,32 @@ pub enum ConfigureOutcome {
 
 /// Validate an npm package name.
 ///
-/// Rejects: `..` substrings, post-`/` segments that start with `.` or `_`
+/// Rejects: `..` substrings, a scope or name that starts with `.` or `_`
 /// (npm policy — would otherwise resolve oddly through `import()`), and any
-/// char outside `[a-zA-Z0-9._-]` in the name part. `pub(crate)` so `add.rs`
-/// can share the single source of truth.
+/// char outside `[a-zA-Z0-9._-]` in the scope or the name. `pub(crate)` so
+/// `add.rs` can share the single source of truth.
 pub(crate) fn is_valid_npm_name(s: &str) -> bool {
-    if s.is_empty() || s.contains("..") {
+    if s.contains("..") {
         return false;
     }
-    if s.starts_with('@') {
-        let parts: Vec<&str> = s.splitn(2, '/').collect();
-        if parts.len() != 2 || parts[0].len() <= 1 || parts[1].is_empty() {
-            return false;
-        }
-        // npm rejects names whose post-`/` segment starts with `.` or `_`.
-        let first = parts[1].chars().next().unwrap_or('\0');
-        if first == '.' || first == '_' {
-            return false;
-        }
-        parts[1]
+    match s.strip_prefix('@') {
+        Some(scoped) => match scoped.split_once('/') {
+            Some((scope, name)) => is_valid_name_segment(scope) && is_valid_name_segment(name),
+            None => false,
+        },
+        None => is_valid_name_segment(s),
+    }
+}
+
+/// One segment of a package name: the scope (without its `@`) or the name.
+/// Non-empty, not starting with `.` or `_`, and only `[a-zA-Z0-9._-]` — the
+/// dot included, as in `socket.io` or `lodash.merge`.
+fn is_valid_name_segment(segment: &str) -> bool {
+    match segment.chars().next() {
+        None | Some('.') | Some('_') => false,
+        Some(_) => segment
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-    } else {
-        let first = s.chars().next().unwrap_or('\0');
-        if first == '.' || first == '_' {
-            return false;
-        }
-        s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'),
     }
 }
 
@@ -602,6 +600,34 @@ mod tests {
     fn is_valid_npm_name_rejects_leading_underscore_in_tail() {
         assert!(!is_valid_npm_name("@x/_internal"));
         assert!(!is_valid_npm_name("_private"));
+    }
+
+    #[test]
+    fn is_valid_npm_name_accepts_a_dot_inside_an_unscoped_name() {
+        // Legal npm, and the same character the scoped branch already took.
+        for name in ["socket.io", "lodash.merge", "passport.js", "highlight.js"] {
+            assert!(is_valid_npm_name(name), "{name} must be accepted");
+        }
+        // The dot is never the first character, and `..` stays refused.
+        assert!(!is_valid_npm_name(".socket.io"));
+        assert!(!is_valid_npm_name("socket..io"));
+    }
+
+    #[test]
+    fn is_valid_npm_name_checks_the_scope_like_the_name() {
+        // The scope reaches the package manager's argv and `import()` as much
+        // as the name does; it was taken whole, whatever it held.
+        for name in [
+            "@a b/x",
+            "@x;y/z",
+            "@x$(id)/z",
+            "@x\\y/z",
+            "@x/y/z",
+            "@.x/z",
+        ] {
+            assert!(!is_valid_npm_name(name), "{name} must be refused");
+        }
+        assert!(is_valid_npm_name("@my-org.io/x"));
     }
 
     #[test]
