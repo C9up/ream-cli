@@ -107,10 +107,11 @@ fn a_failed_install_fails_the_command() {
     assert!(manifest.contains("\"version\": \"0.1.0\""), "{manifest}");
     assert!(
         manifest.contains(&format!(
-            "\"@c9up/ream-cli\": \"^{}\"",
-            env!("CARGO_PKG_VERSION")
+            "\"@c9up/ream-cli\": \"^{}.{}.0\"",
+            env!("CARGO_PKG_VERSION_MAJOR"),
+            env!("CARGO_PKG_VERSION_MINOR")
         )),
-        "the scripts call `ream`, so the project must carry the CLI that wrote it — got:\n{manifest}"
+        "the scripts call `ream`, so the project must carry the CLI line that wrote it — got:\n{manifest}"
     );
 }
 

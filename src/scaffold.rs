@@ -477,11 +477,19 @@ const DEV_DEPS: &[(&str, &str)] = &[
     ("typescript", "^5.7"),
 ];
 
-/// The version of this CLI, which a scaffolded app declares as its own
-/// `@c9up/ream-cli`. It is the binary's own version rather than an entry in the
-/// tables above: the npm package and this binary are published together, so
-/// the version that wrote the project is always one the registry has.
-const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The range a scaffolded app declares for its own `@c9up/ream-cli`: the
+/// release line of the binary that wrote it, `^MAJOR.MINOR.0`. Not the exact
+/// version: until a release is published the registry does not have it, and
+/// the install of a project written by that release (its CI, its publish
+/// run) would fail on its own CLI. The line resolves to the newest published
+/// release in it, which is this one as soon as it ships.
+const CLI_RANGE: &str = concat!(
+    "^",
+    env!("CARGO_PKG_VERSION_MAJOR"),
+    ".",
+    env!("CARGO_PKG_VERSION_MINOR"),
+    ".0"
+);
 
 /// Plus the bridge, for a template whose app the suites boot.
 const APP_DEV_DEPS: &[(&str, &str)] = &[("@c9up/helix-plugin-ream", "^0.1.6")];
@@ -500,8 +508,7 @@ fn package_json(name: &str, template: &str) -> String {
     // The scripts below call `ream`, so the project carries the CLI that wrote
     // it. Without it they lean on a global binary a CI runner does not have,
     // and `npx ream` fetches an unrelated npm package called `ream`.
-    let cli_range = format!("^{CLI_VERSION}");
-    dev_deps.push(quoted(&("@c9up/ream-cli", cli_range.as_str())));
+    dev_deps.push(quoted(&("@c9up/ream-cli", CLI_RANGE)));
     if boots_its_app(template) {
         dev_deps.extend(APP_DEV_DEPS.iter().map(quoted));
     }
@@ -1228,7 +1235,11 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{template}: invalid JSON ({e}):\n{manifest}"));
             assert_eq!(
                 parsed["devDependencies"]["@c9up/ream-cli"],
-                format!("^{}", env!("CARGO_PKG_VERSION")),
+                format!(
+                    "^{}.{}.0",
+                    env!("CARGO_PKG_VERSION_MAJOR"),
+                    env!("CARGO_PKG_VERSION_MINOR")
+                ),
                 "{template}: {manifest}"
             );
         }
