@@ -426,6 +426,8 @@ jobs:
       # out, nothing installs the new version, so a failure in between strands
       # no user on a wrapper whose binaries are missing.
       # Under the drift gate's dist-tag: a backport must not move `latest`.
+      # --provenance signs each tarball with this run's OIDC identity, as every
+      # other package's publish does, so all six trace back to this workflow.
       - name: Publish the six packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -437,7 +439,7 @@ jobs:
             exit 1
           fi
           for dir in npm/ream-cli-linux-x64 npm/ream-cli-linux-arm64 npm/ream-cli-darwin-x64 npm/ream-cli-darwin-arm64 npm/ream-cli-win32-x64 npm/ream-cli; do
-            (cd "$dir" && npm publish --tag "$DIST_TAG")
+            (cd "$dir" && npm publish --provenance --tag "$DIST_TAG")
           done
       - name: Create the GitHub release
         # Notes from the commits this tag contains. Without it a published
