@@ -106,6 +106,7 @@ mod signals {
     /// gone: whoever started it sees the signal rather than an exit code, and
     /// a shell loop running it stops on Ctrl-C as it would for any program.
     pub fn die_by(signal: Signal) -> ! {
+        super::keyboard::restore();
         // SAFETY: restoring the default action and raising it on ourselves.
         unsafe {
             libc::signal(signal, libc::SIG_DFL);
@@ -126,8 +127,12 @@ mod signals {
             // leader of.
             unsafe { libc::killpg(*group, libc::SIGTSTP) };
         }
+        // The shell gets its terminal back as it lent it: echo and line
+        // editing on. The keyboard takes it again once `fg` hands it back.
+        super::keyboard::pause();
         // SAFETY: stops this process until a SIGCONT.
         unsafe { libc::raise(libc::SIGSTOP) };
+        super::keyboard::resume();
         for group in &groups {
             // SAFETY: as above.
             unsafe { libc::killpg(*group, libc::SIGCONT) };
@@ -158,6 +163,250 @@ mod signals {
     pub fn suspend(_groups: &[u32]) {}
 }
 
+/// The keys typed in the terminal `ream dev` runs in, passed on to the server.
+///
+/// The server answers them itself — `r`, `c`, `o`, `h` and Ctrl-D, in
+/// `@c9up/ream`'s dev shortcuts — because it alone knows the address it bound
+/// for `o`, and it restarts by exiting on [`EXIT_RESTART`]. It listens only
+/// when its stdin is a terminal. Its stdin cannot be `ream dev`'s terminal
+/// any more: every child runs in its own process group (see [`supervised`]),
+/// outside the terminal's foreground group, and a read from there stops it
+/// (SIGTTIN).
+///
+/// So the server's stdin is a pseudo-terminal of its own — a terminal it can
+/// read and put in raw mode, but not its controlling terminal, so no read of
+/// it can ever stop it — and `ream dev`, which owns the real one, copies each
+/// key across. Ctrl-C and Ctrl-Z stay signals to `ream dev` (the terminal
+/// keeps ISIG), handled as before.
+///
+/// Only with a terminal on stdin, and only while `ream dev` is in its
+/// foreground group: under an agent, CI, a pipe or `&`, nothing is read and
+/// every child keeps the pipe [`supervised`] gives it.
+#[cfg(unix)]
+mod keyboard {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::process::Stdio;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
+
+    /// The server's end of the pseudo-terminal, once [`start`] opened one.
+    static SERVER_END: OnceLock<OwnedFd> = OnceLock::new();
+    /// The terminal's mode before `ream dev` changed it, to put back.
+    static ORIGINAL: Mutex<Option<libc::termios>> = Mutex::new(None);
+    /// Whether the terminal is in the mode `ream dev` reads keys in.
+    static APPLIED: AtomicBool = AtomicBool::new(false);
+    /// Set while the terminal is lent back to the shell, or for good on exit.
+    static PAUSED: AtomicBool = AtomicBool::new(false);
+
+    /// Whether `ream dev`'s group is the one the terminal on stdin serves.
+    fn foreground() -> bool {
+        // SAFETY: plain queries on fd 0.
+        unsafe { libc::isatty(0) == 1 && libc::tcgetpgrp(0) == libc::getpgrp() }
+    }
+
+    /// Open the pseudo-terminal and start copying keys, when there is a
+    /// terminal to read them from. Called once, before the first child.
+    pub fn start() {
+        if !foreground() {
+            return;
+        }
+        // SAFETY: tcgetattr fills a zeroed termios.
+        let mut original: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(0, &mut original) } != 0 {
+            return;
+        }
+        let Some((master, slave)) = open_pty() else {
+            return;
+        };
+        // A background `ream dev` touching the terminal — restoring its mode
+        // on the way out, a read racing a `bg` — gets an error instead of
+        // being stopped. Children get the default back (see `supervised`).
+        // SAFETY: setting a disposition, before any thread reads the terminal.
+        unsafe {
+            libc::signal(libc::SIGTTIN, libc::SIG_IGN);
+            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        }
+        if let Ok(mut saved) = ORIGINAL.lock() {
+            *saved = Some(original);
+        }
+        if SERVER_END.set(slave).is_err() {
+            return;
+        }
+        std::thread::spawn(move || forward(master));
+    }
+
+    /// The server's stdin: the pseudo-terminal, or `None` without one.
+    pub fn server_stdin() -> Option<Stdio> {
+        let slave = SERVER_END.get()?;
+        // Keys typed while no server was running are not meant for the next
+        // one: an `r` pressed during a crash must not restart what replaces it.
+        // SAFETY: a plain call on a descriptor this process owns.
+        unsafe { libc::tcflush(slave.as_raw_fd(), libc::TCIFLUSH) };
+        slave.try_clone().ok().map(Stdio::from)
+    }
+
+    /// Give the terminal back its own mode, until [`resume`].
+    pub fn pause() {
+        PAUSED.store(true, Ordering::SeqCst);
+        put_back();
+    }
+
+    pub fn resume() {
+        PAUSED.store(false, Ordering::SeqCst);
+    }
+
+    /// Give the terminal back its own mode for good: `ream dev` is ending.
+    pub fn restore() {
+        PAUSED.store(true, Ordering::SeqCst);
+        put_back();
+    }
+
+    fn put_back() {
+        if !APPLIED.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        if let Ok(saved) = ORIGINAL.lock() {
+            if let Some(mode) = saved.as_ref() {
+                // SAFETY: restoring a mode tcgetattr returned for fd 0.
+                unsafe { libc::tcsetattr(0, libc::TCSANOW, mode) };
+            }
+        }
+    }
+
+    /// Keys a character at a time and unechoed, signals still raised: what
+    /// the server's own raw mode was, minus taking Ctrl-C and Ctrl-Z away from
+    /// `ream dev`. Output processing stays on, so lines still start at the
+    /// left margin.
+    fn apply() {
+        let Ok(saved) = ORIGINAL.lock() else { return };
+        let Some(mut mode) = saved.as_ref().copied() else {
+            return;
+        };
+        mode.c_lflag &= !(libc::ICANON | libc::ECHO);
+        mode.c_cc[libc::VMIN] = 1;
+        mode.c_cc[libc::VTIME] = 0;
+        // SAFETY: a mode derived from the one tcgetattr returned for fd 0.
+        if unsafe { libc::tcsetattr(0, libc::TCSANOW, &mode) } == 0 {
+            APPLIED.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Copy keys from the terminal to the server's pseudo-terminal while
+    /// `ream dev` is in the foreground; leave the terminal alone otherwise.
+    fn forward(master: OwnedFd) {
+        let mut buffer = [0u8; 64];
+        loop {
+            if PAUSED.load(Ordering::SeqCst) || !foreground() {
+                if !PAUSED.load(Ordering::SeqCst) {
+                    put_back();
+                }
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+            if !APPLIED.load(Ordering::SeqCst) {
+                apply();
+            }
+            let mut ready = libc::pollfd {
+                fd: 0,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one pollfd, owned here.
+            if unsafe { libc::poll(&mut ready, 1, 200) } <= 0 {
+                continue;
+            }
+            // SAFETY: reading into a buffer owned here, within its length.
+            let read = unsafe { libc::read(0, buffer.as_mut_ptr().cast(), buffer.len()) };
+            let Ok(length) = usize::try_from(read) else {
+                // EIO when moved to the background, EINTR on a signal.
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            };
+            if length == 0 {
+                // The terminal hung up; SIGHUP ends `ream dev` from there.
+                return;
+            }
+            // Non-blocking: with no server reading — crashed, waiting for an
+            // edit — a full buffer drops the key rather than stopping this
+            // loop.
+            // SAFETY: writing bytes this function just read.
+            unsafe { libc::write(master.as_raw_fd(), buffer.as_ptr().cast(), length) };
+        }
+    }
+
+    /// A pseudo-terminal pair, the server's end already in raw mode so a key
+    /// is readable at once and nothing is echoed back.
+    fn open_pty() -> Option<(OwnedFd, OwnedFd)> {
+        // SAFETY: plain libc calls; every descriptor is owned as soon as it
+        // exists, and every result is checked.
+        unsafe {
+            let raw = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            if raw < 0 {
+                return None;
+            }
+            let master = OwnedFd::from_raw_fd(raw);
+            if libc::grantpt(raw) != 0 || libc::unlockpt(raw) != 0 {
+                return None;
+            }
+            libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(raw, libc::F_SETFL, libc::O_NONBLOCK);
+            let name = libc::ptsname(raw);
+            if name.is_null() {
+                return None;
+            }
+            let fd = libc::open(name, libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+            if fd < 0 {
+                return None;
+            }
+            let slave = OwnedFd::from_raw_fd(fd);
+            let mut mode: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut mode) != 0 {
+                return None;
+            }
+            // libuv's raw mode, which is what Node's setRawMode applies.
+            mode.c_iflag &= !(libc::BRKINT | libc::ICRNL | libc::INPCK | libc::ISTRIP | libc::IXON);
+            mode.c_oflag |= libc::ONLCR;
+            mode.c_cflag |= libc::CS8;
+            mode.c_lflag &= !(libc::ECHO | libc::ICANON | libc::IEXTEN | libc::ISIG);
+            mode.c_cc[libc::VMIN] = 1;
+            mode.c_cc[libc::VTIME] = 0;
+            if libc::tcsetattr(fd, libc::TCSANOW, &mode) != 0 {
+                return None;
+            }
+            Some((master, slave))
+        }
+    }
+}
+
+/// Windows has no process groups to keep a child out of the console's
+/// input: the server reads the console itself, as it always did, when there
+/// is one. The assets watcher keeps its pipe.
+#[cfg(not(unix))]
+mod keyboard {
+    use std::io::IsTerminal;
+    use std::process::Stdio;
+
+    pub fn start() {}
+
+    pub fn server_stdin() -> Option<Stdio> {
+        std::io::stdin().is_terminal().then(Stdio::inherit)
+    }
+
+    pub fn restore() {}
+}
+
+/// Start passing the terminal's keys on to the server, when there is a
+/// terminal. `ream dev` calls it once, before its first child.
+pub fn start_keyboard() {
+    keyboard::start();
+}
+
+/// Give the terminal back its mode. `ream dev` calls it before returning.
+pub fn restore_keyboard() {
+    keyboard::restore();
+}
+
 /// Start answering SIGINT, SIGTERM, SIGHUP and SIGTSTP. `ream dev` calls it
 /// before its first child; nothing else in the binary supervises children.
 pub fn install_signal_handlers() {
@@ -169,16 +418,37 @@ pub fn install_signal_handlers() {
 /// - Its own process group, so a stop reaches what it started: `pnpm
 ///   css:watch` is pnpm AND the watcher it runs, and a signal to pnpm alone
 ///   left the watcher behind.
-/// - No stdin: a process outside the terminal's foreground group that reads
-///   it is stopped by the kernel (SIGTTIN), which looks like a hang.
+/// - A stdin of its own: a pipe `ream dev` holds open and never writes to,
+///   not the terminal, since a process outside the terminal's foreground
+///   group that reads it is stopped by the kernel (SIGTTIN), which looks like
+///   a hang. Not `/dev/null` either: a watcher that ends at the end of its
+///   input, as `tailwindcss --watch` does to avoid outliving its parent, read
+///   that EOF right after its first build, and `ream dev` then stopped the
+///   server with it. The pipe ends when `ream dev` does, and only then. The
+///   [`Child`] owns the write end, so it stays open as long as the child is
+///   supervised.
+///   The server is the exception when `ream dev` runs in a terminal: its
+///   stdin is then the pseudo-terminal [`keyboard`] copies the keys into.
+/// - SIGTTIN and SIGTTOU at their default, which `ream dev` itself ignores
+///   while it reads the terminal.
 /// - On Linux, SIGTERM when `ream dev` dies without a chance to clean up
 ///   (SIGKILL, the OOM killer), so the server does not keep its port.
-fn supervised(command: &mut Command) -> &mut Command {
-    command.stdin(Stdio::null());
+fn supervised(command: &mut Command, keys: bool) -> &mut Command {
+    let terminal = if keys { keyboard::server_stdin() } else { None };
+    command.stdin(terminal.unwrap_or_else(Stdio::piped));
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+        // SAFETY: signal() is async-signal-safe; an ignored disposition is
+        // inherited through exec, a handled one is not.
+        unsafe {
+            command.pre_exec(|| {
+                libc::signal(libc::SIGTTIN, libc::SIG_DFL);
+                libc::signal(libc::SIGTTOU, libc::SIG_DFL);
+                Ok(())
+            });
+        }
         #[cfg(target_os = "linux")]
         {
             let parent = std::process::id();
@@ -279,6 +549,7 @@ pub fn run_attached(command: &str, args: &[&str]) -> Result<ExitStatus, String> 
             .args(args)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit()),
+        true,
     )
     .spawn()
     .map_err(|e| format!("Failed to run '{command}': {e}"))?;
@@ -431,6 +702,10 @@ pub struct Process {
     /// swap in place. Upstream hears the same event over Node's IPC channel,
     /// which a Rust parent does not have.
     pub restartable: bool,
+    /// Whether this process reads the terminal's keys (see [`keyboard`]).
+    /// Only the server does: one process can own the keys, and it is the one
+    /// that answers them.
+    pub keys: bool,
 }
 
 /// The exit code the dev server uses to ask for a restart.
@@ -590,7 +865,7 @@ pub fn run_together(processes: Vec<Process>, watch_dirs: &[&str]) -> Result<(), 
     let mut children: Vec<(String, Child)> = Vec::new();
 
     for (index, process) in processes.iter().enumerate() {
-        match spawn_piped(&process.spec, &prefixes[index]) {
+        match spawn_piped(process, &prefixes[index]) {
             Ok(child) => children.push((process.label.clone(), child)),
             Err(message) => {
                 // Whatever already started has to go with it. `Child` has no
@@ -655,7 +930,7 @@ pub fn run_together(processes: Vec<Process>, watch_dirs: &[&str]) -> Result<(), 
 
             // A restart request is not an exit to report — it is the next boot.
             if processes[index].restartable && code == EXIT_RESTART {
-                match spawn_piped(&processes[index].spec, &prefixes[index]) {
+                match spawn_piped(&processes[index], &prefixes[index]) {
                     Ok(replacement) => {
                         if let Ok(mut slot) = child.lock() {
                             *slot = replacement;
@@ -694,7 +969,7 @@ pub fn run_together(processes: Vec<Process>, watch_dirs: &[&str]) -> Result<(), 
                 if unchanged {
                     continue;
                 }
-                match spawn_piped(&processes[index].spec, &prefixes[index]) {
+                match spawn_piped(&processes[index], &prefixes[index]) {
                     Ok(replacement) => {
                         if let Ok(mut slot) = shared[index].1.lock() {
                             *slot = replacement;
@@ -738,13 +1013,15 @@ pub fn run_together(processes: Vec<Process>, watch_dirs: &[&str]) -> Result<(), 
 /// Split out because a restart has to do exactly what the first start did,
 /// pumps included: a replacement whose streams are not pumped is a server whose
 /// output silently stops after the first hot reload.
-fn spawn_piped(spec: &CommandSpec, prefix: &str) -> Result<Child, String> {
+fn spawn_piped(process: &Process, prefix: &str) -> Result<Child, String> {
+    let spec = &process.spec;
     let mut child = supervised(
         crate::tools::command(&spec.command)
             .args(&spec.args)
             .env("FORCE_COLOR", "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped()),
+        process.keys,
     )
     .spawn()
     .map_err(|e| format!("failed to start `{}`: {e}", spec.command))?;
@@ -923,6 +1200,7 @@ mod tests {
             label: "server".to_string(),
             colour: COLOURS[0],
             restartable: true,
+            keys: false,
             spec: CommandSpec {
                 command: "sh".to_string(),
                 args: vec!["-c".to_string(), script],
@@ -943,6 +1221,7 @@ mod tests {
             label: "assets".to_string(),
             colour: COLOURS[0],
             restartable: false,
+            keys: false,
             spec: CommandSpec {
                 command: "sh".to_string(),
                 args: vec!["-c".to_string(), format!("exit {EXIT_RESTART}")],
@@ -961,6 +1240,7 @@ mod tests {
                 label: "short".to_string(),
                 colour: COLOURS[0],
                 restartable: false,
+                keys: false,
                 spec: CommandSpec {
                     command: "sh".to_string(),
                     args: vec!["-c".to_string(), "exit 0".to_string()],
@@ -970,6 +1250,7 @@ mod tests {
                 label: "long".to_string(),
                 colour: COLOURS[1],
                 restartable: false,
+                keys: false,
                 spec: CommandSpec {
                     command: "sh".to_string(),
                     args: vec!["-c".to_string(), "sleep 30".to_string()],
@@ -988,6 +1269,7 @@ mod tests {
             label: "assets".to_string(),
             colour: COLOURS[0],
             restartable: false,
+            keys: false,
             spec: CommandSpec {
                 command: "sh".to_string(),
                 args: vec!["-c".to_string(), "exit 3".to_string()],
@@ -1034,6 +1316,7 @@ mod tests {
                 label: "server".to_string(),
                 colour: COLOURS[0],
                 restartable: false,
+                keys: false,
                 spec: CommandSpec {
                     command: "sh".to_string(),
                     // Long enough for the watcher to have written its pid.
@@ -1044,6 +1327,7 @@ mod tests {
                 label: "assets".to_string(),
                 colour: COLOURS[1],
                 restartable: false,
+                keys: false,
                 spec: CommandSpec {
                     command: "sh".to_string(),
                     args: vec!["-c".to_string(), script],
@@ -1082,6 +1366,7 @@ mod tests {
                 label: "server".to_string(),
                 colour: COLOURS[0],
                 restartable: false,
+                keys: false,
                 spec: CommandSpec {
                     command: "sh".to_string(),
                     args: vec!["-c".to_string(), "sleep 1".to_string()],
@@ -1091,6 +1376,7 @@ mod tests {
                 label: "assets".to_string(),
                 colour: COLOURS[1],
                 restartable: false,
+                keys: false,
                 spec: CommandSpec {
                     command: "sh".to_string(),
                     args: vec!["-c".to_string(), script],
@@ -1123,6 +1409,7 @@ mod tests {
                 label: "server".to_string(),
                 colour: COLOURS[0],
                 restartable: false,
+                keys: false,
                 spec: CommandSpec {
                     command: "sh".to_string(),
                     args: vec!["-c".to_string(), script],
@@ -1132,6 +1419,7 @@ mod tests {
                 label: "assets".to_string(),
                 colour: COLOURS[1],
                 restartable: false,
+                keys: false,
                 spec: CommandSpec {
                     command: "ream-no-such-binary".to_string(),
                     args: Vec::new(),
@@ -1225,6 +1513,7 @@ mod tests {
                 label: "server".to_string(),
                 colour: COLOURS[0],
                 restartable: true,
+                keys: false,
                 spec: CommandSpec {
                     command: "sh".to_string(),
                     args: vec!["-c".to_string(), script],
@@ -1251,6 +1540,7 @@ mod tests {
                 label: "server".to_string(),
                 colour: COLOURS[0],
                 restartable: true,
+                keys: false,
                 spec: CommandSpec {
                     command: "sh".to_string(),
                     args: vec!["-c".to_string(), "exit 1".to_string()],
@@ -1269,6 +1559,7 @@ mod tests {
             label: "assets".to_string(),
             colour: COLOURS[0],
             restartable: false,
+            keys: false,
             spec: CommandSpec {
                 command: "ream-no-such-binary".to_string(),
                 args: Vec::new(),
