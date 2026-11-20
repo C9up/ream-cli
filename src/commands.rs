@@ -17,7 +17,7 @@ pub fn require_ts_loader() -> Result<(), String> {
 /// The rooted form, so the guard can be tested without moving the process CWD —
 /// which would race every other test in the binary.
 pub fn require_ts_loader_at(root: &std::path::Path) -> Result<(), String> {
-    if root.join("node_modules/@swc-node/register").exists() {
+    if crate::tools::find_package(root, "@swc-node/register").is_some() {
         return Ok(());
     }
     // Declared but absent means the tree is stale, and `pnpm install` is the
@@ -50,7 +50,34 @@ fn inherited_status(cmd: &str, args: &[&str]) -> Result<ExitStatus, String> {
         .map_err(|e| format!("Failed to run '{}': {}", cmd, e))
 }
 
-/// Spawn a Node.js command, forwarding stdio.
+/// Run `node args` as the command itself rather than as a child of `ream`.
+///
+/// A console command, `test`, `repl` and `inspect` have nothing left to do once
+/// node ends but report how it ended. Waiting on it as a child put `ream` in
+/// between: SIGTERM from `docker stop` or `timeout`, or SIGHUP from a closed
+/// terminal, ended the binary at once, and node — never told — kept running
+/// orphaned, or was SIGKILLed with PID 1 gone, skipping its `terminating`
+/// hooks. Replaced by node, nothing stands in between, as with `node ace` and
+/// `ream start`: the signals and the exit code are node's own.
+///
+/// On Unix this only returns when `exec` failed; the `ExitStatus` arm is the
+/// Windows path, which has no `exec` and keeps the child.
+#[cfg(unix)]
+fn node_in_foreground(args: &[&str]) -> Result<ExitStatus, String> {
+    use std::os::unix::process::CommandExt;
+    // Rust's stdout flushes on newlines; whatever was printed without one
+    // would be lost with the image.
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let err = Command::new("node").args(args).exec();
+    Err(format!("Failed to run 'node': {err}"))
+}
+
+#[cfg(not(unix))]
+fn node_in_foreground(args: &[&str]) -> Result<ExitStatus, String> {
+    inherited_status("node", args)
+}
+
 /// What a signal-terminated child means for the command that supervised it.
 ///
 /// Ctrl-C is how a dev server is meant to be stopped, so INT and TERM are not
@@ -185,7 +212,8 @@ fn server_entry_at(root: &std::path::Path) -> &'static str {
 /// Saying so beats the stack trace: the failure is about how the dependency is
 /// linked, and nothing in that trace mentions it.
 fn dependency_served_as_typescript() -> Option<String> {
-    let manifest = std::fs::read_to_string("node_modules/@c9up/ream/package.json").ok()?;
+    let package = crate::tools::find_package(std::path::Path::new("."), "@c9up/ream")?;
+    let manifest = std::fs::read_to_string(package.join("package.json")).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&manifest).ok()?;
     if !exports_serve_typescript(parsed.get("exports")?) {
         return None;
@@ -413,6 +441,18 @@ pub fn run_dev(clear_screen: bool, assets_flags: &crate::dev::AssetsFlags) -> Re
     // From here on a signal to `ream dev` is passed on to its children rather
     // than ending it and leaving them running.
     crate::dev::install_signal_handlers();
+    // In a terminal, the server's keys (r, c, o, h) reach it through `ream dev`.
+    crate::dev::start_keyboard();
+    let outcome = run_dev_children(assets, assets_flags);
+    crate::dev::restore_keyboard();
+    outcome
+}
+
+/// The children of `ream dev`, once its signals and keyboard are set up.
+fn run_dev_children(
+    assets: crate::dev::AssetsConfig,
+    assets_flags: &crate::dev::AssetsFlags,
+) -> Result<(), String> {
     let Some(watcher) = assets_flags.apply(assets.dev_server) else {
         // Nothing to run alongside: keep the plain path, where the server owns
         // the terminal and its output is not piped through a prefix.
@@ -466,12 +506,14 @@ pub fn run_dev(clear_screen: bool, assets_flags: &crate::dev::AssetsFlags) -> Re
                 // on `EXIT_RESTART`. An asset watcher that exits has genuinely
                 // stopped.
                 restartable: true,
+                keys: true,
             },
             crate::dev::Process {
                 label: "assets".to_string(),
                 colour: crate::dev::COLOURS[1],
                 spec: watcher,
                 restartable: false,
+                keys: false,
             },
         ],
         crate::dev::WATCH_DIRS,
@@ -886,16 +928,13 @@ pub fn run_repl() -> Result<(), String> {
         });
     "#;
 
-    let status = inherited_status(
-        "node",
-        &[
-            "--import",
-            "@swc-node/register/esm-register",
-            "--input-type=module",
-            "-e",
-            script,
-        ],
-    )?;
+    let status = node_in_foreground(&[
+        "--import",
+        "@swc-node/register/esm-register",
+        "--input-type=module",
+        "-e",
+        script,
+    ])?;
 
     if !status.success() {
         return Err(format!(
@@ -904,6 +943,84 @@ pub fn run_repl() -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Whether `path` is a regular file (`true`) or absent (`false`); anything
+/// else — a symbolic link, a directory, a FIFO — is refused by name.
+///
+/// NAMED DEVIATION (better than upstream) — AdonisJS's env editor reads and
+/// writes through a link. `generate:key` is run right after cloning a
+/// repository, which decides what `.env` and `.env.example` are.
+fn regular_file_or_absent(path: &std::path::Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(format!(
+            "Refusing to write {} through a symbolic link — replace it with a regular file.",
+            path.display()
+        )),
+        Ok(meta) if meta.is_file() => Ok(true),
+        Ok(_) => Err(format!("{} is not a regular file.", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("Failed to inspect {}: {}", path.display(), e)),
+    }
+}
+
+/// Open options that refuse what `regular_file_or_absent` refused, at the
+/// syscall: a link swapped in after the check fails with `ELOOP`, and a FIFO
+/// does not block the open.
+fn no_follow(options: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    options
+}
+
+/// The opened file, once it is known to be a regular one.
+fn ensure_regular(file: std::fs::File, path: &std::path::Path) -> Result<std::fs::File, String> {
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
+    if meta.is_file() {
+        Ok(file)
+    } else {
+        Err(format!("{} is not a regular file.", path.display()))
+    }
+}
+
+fn read_env_file(path: &std::path::Path) -> Result<String, String> {
+    use std::io::Read;
+    let file = no_follow(std::fs::OpenOptions::new().read(true))
+        .open(path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    let mut text = String::new();
+    ensure_regular(file, path)?
+        .read_to_string(&mut text)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    Ok(text)
+}
+
+/// Write `content` to `path`, created with `mode` (before the umask) when it
+/// does not exist; an existing file keeps the mode its owner gave it.
+fn write_env_file(path: &std::path::Path, content: &str, mode: u32) -> Result<(), String> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    let file = no_follow(&mut options)
+        .open(path)
+        .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    // Truncated only once it is known to be a regular file.
+    let mut file = ensure_regular(file, path)?;
+    file.set_len(0)
+        .and_then(|()| file.write_all(content.as_bytes()))
+        .map_err(|e| format!("Failed to write {}: {}", path.display(), e))
 }
 
 /// Whether this machine says it is production, under any of the spellings
@@ -958,9 +1075,15 @@ pub fn run_generate_key(force: bool, show: bool) -> Result<(), String> {
         );
     }
 
+    // Both files are checked before either is read or written, so a refusal
+    // leaves the project as it was. A cloned repository controls both names:
+    // a link would carry the write into any file of the user's account.
     let env_path = std::path::Path::new(".env");
-    let existing = if env_path.exists() {
-        std::fs::read_to_string(env_path).map_err(|e| format!("Failed to read .env: {}", e))?
+    let example_path = std::path::Path::new(".env.example");
+    let env_present = regular_file_or_absent(env_path)?;
+    let example_present = regular_file_or_absent(example_path)?;
+    let existing = if env_present {
+        read_env_file(env_path)?
     } else {
         String::new()
     };
@@ -980,19 +1103,16 @@ pub fn run_generate_key(force: bool, show: bool) -> Result<(), String> {
 
     let key = generate_app_key()?;
     let updated = crate::envfile::upsert_env_var(&existing, "APP_KEY", &key);
-    std::fs::write(env_path, updated).map_err(|e| format!("Failed to write .env: {}", e))?;
+    write_env_file(env_path, &updated, 0o600)?;
 
     // The committed example records the variable with an empty value, and
     // only where the project keeps one — the way upstream's env editor writes
     // `APP_KEY=` there. The key itself never leaves `.env`.
-    let example_path = std::path::Path::new(".env.example");
-    if example_path.is_file() {
-        let example = std::fs::read_to_string(example_path)
-            .map_err(|e| format!("Failed to read .env.example: {}", e))?;
+    if example_present {
+        let example = read_env_file(example_path)?;
         let updated = crate::envfile::upsert_env_var(&example, "APP_KEY", "");
         if updated != example {
-            std::fs::write(example_path, updated)
-                .map_err(|e| format!("Failed to write .env.example: {}", e))?;
+            write_env_file(example_path, &updated, 0o666)?;
         }
     }
 
@@ -1233,7 +1353,7 @@ pub fn run_console(argv: &[String]) -> Result<(), String> {
 
     let args = console_node_args(&entry, argv);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let status = inherited_status("node", &args)?;
+    let status = node_in_foreground(&args)?;
 
     if !status.success() {
         // The kernel already reported what went wrong; propagate its code
@@ -1641,16 +1761,13 @@ pub fn run_inspect() -> Result<(), String> {
         process.exit(0); // one-shot CLI: don't let app-owned handles keep it alive
     "#;
 
-    let status = inherited_status(
-        "node",
-        &[
-            "--import",
-            "@swc-node/register/esm-register",
-            "--input-type=module",
-            "-e",
-            script,
-        ],
-    )?;
+    let status = node_in_foreground(&[
+        "--import",
+        "@swc-node/register/esm-register",
+        "--input-type=module",
+        "-e",
+        script,
+    ])?;
 
     if !status.success() {
         return Err(format!(
@@ -1857,16 +1974,13 @@ pub fn run_tests(flags: &TestFlags<'_>, coverage: CoverageFlags<'_>) -> Result<(
         options
     );
 
-    let status = inherited_status(
-        "node",
-        &[
-            "--import",
-            "@swc-node/register/esm-register",
-            "--input-type=module",
-            "-e",
-            &script,
-        ],
-    )?;
+    let status = node_in_foreground(&[
+        "--import",
+        "@swc-node/register/esm-register",
+        "--input-type=module",
+        "-e",
+        &script,
+    ])?;
 
     if !status.success() {
         return Err(format!(
@@ -2604,6 +2718,24 @@ mod tests {
         std::fs::create_dir_all(dir.join("node_modules/@swc-node/register")).unwrap();
         assert!(require_ts_loader_at(&dir).is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ts_loader_guard_finds_the_loader_hoisted_to_a_parent_workspace() {
+        // A pnpm `nodeLinker: hoisted` workspace: the app has no node_modules,
+        // the loader sits in the root's.
+        let root = loader_fixture("hoisted");
+        std::fs::create_dir_all(root.join("node_modules/@swc-node/register")).unwrap();
+        let app = root.join("apps/server");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("package.json"),
+            r#"{"devDependencies":{"@swc-node/register":"^1"}}"#,
+        )
+        .unwrap();
+
+        assert!(require_ts_loader_at(&app).is_ok());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

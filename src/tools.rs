@@ -107,6 +107,19 @@ pub fn command(name: &str) -> Command {
     Command::new(name)
 }
 
+/// Where Node would find package `name` for a module in `start`: the
+/// `node_modules/<name>` of `start`, then of each parent up to the filesystem
+/// root. A hoisted monorepo (pnpm `nodeLinker: hoisted`, npm and yarn
+/// workspaces) installs an app's dependencies in the root's `node_modules`,
+/// and the app has none of its own.
+pub fn find_package(start: &Path, name: &str) -> Option<PathBuf> {
+    let start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+    start
+        .ancestors()
+        .map(|dir| dir.join("node_modules").join(name))
+        .find(|candidate| candidate.is_dir())
+}
+
 /// The `node_modules/.bin` directories from `start` up to the filesystem root,
 /// nearest first — the order execa's `preferLocal` puts them on `PATH`.
 fn local_bin_dirs(start: &Path) -> impl Iterator<Item = PathBuf> + '_ {

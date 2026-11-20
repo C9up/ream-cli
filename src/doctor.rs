@@ -399,7 +399,7 @@ fn check_ts_loader() -> Check {
 /// working directory, which the whole test binary shares.
 fn check_ts_loader_at(root: &Path) -> Check {
     const NAME: &str = "@swc-node/register";
-    if root.join("node_modules/@swc-node/register").exists() {
+    if crate::tools::find_package(root, "@swc-node/register").is_some() {
         return Check {
             name: NAME,
             status: Status::Pass,
