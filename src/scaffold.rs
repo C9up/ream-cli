@@ -198,7 +198,8 @@ pub fn run(destination: &str, options: &NewOptions<'_>) -> Result<(), String> {
     write_file(root, "tsconfig.json", &tsconfig())?;
     write_file(root, ".swcrc", &swcrc())?;
     let env = env_file(name, database);
-    write_file(root, ".env", &env)?;
+    // It holds the APP_KEY just minted and the database password.
+    write_secret_file(root, ".env", &env)?;
     // Committed (only `.env` is ignored): what a teammate who clones the
     // project copies to `.env`, with every variable and none of the secrets.
     write_file(root, ".env.example", &env_example(&env))?;
@@ -284,7 +285,27 @@ pub fn run(destination: &str, options: &NewOptions<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// The mode a scaffolded file is created with, before the umask.
+const SHARED_MODE: u32 = 0o666;
+
+/// The mode of a file holding a secret: its owner only, whatever the umask.
+///
+/// NAMED DEVIATION (better than upstream) — AdonisJS writes `.env` with the
+/// umask default, readable by every local account. That file holds the key
+/// signing every cookie, session and CSRF token, on development hosts, shared
+/// CI runners and container images alike.
+const SECRET_MODE: u32 = 0o600;
+
 fn write_file(root: &Path, path: &str, content: &str) -> Result<(), String> {
+    write_file_with_mode(root, path, content, SHARED_MODE)
+}
+
+/// `write_file` for a file holding secrets, created `0600`.
+fn write_secret_file(root: &Path, path: &str, content: &str) -> Result<(), String> {
+    write_file_with_mode(root, path, content, SECRET_MODE)
+}
+
+fn write_file_with_mode(root: &Path, path: &str, content: &str, mode: u32) -> Result<(), String> {
     // A NUL byte would make the OS see a different path than the one checked
     // here; std refuses it at the syscall, but only after the directories on
     // the way were made.
@@ -372,9 +393,18 @@ fn write_file(root: &Path, path: &str, content: &str) -> Result<(), String> {
     // pre-existing entry at `full` — including hardlinks, regular files
     // planted in a TOCTOU window, and (redundantly) symlinks. Closes the
     // race between the leaf check above and the actual write.
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    // The mode is applied by the kernel at creation, so the file is never
+    // readable by others, not even for the time a chmod would take.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    let mut f = options
         .open(&full)
         .map_err(|e| format!("Failed to create {}: {}", path, e))?;
     f.write_all(content.as_bytes())

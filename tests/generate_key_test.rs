@@ -25,14 +25,18 @@ impl TempProject {
     }
 
     fn generate(&self, args: &[&str]) {
-        let output = Command::new(env!("CARGO_BIN_EXE_ream"))
+        let output = self.run(args);
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    fn run(&self, args: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_ream"))
             .arg("generate:key")
             .args(args)
             .current_dir(&self.path)
             .env_remove("NODE_ENV")
             .output()
-            .expect("spawn ream generate:key");
-        assert!(output.status.success(), "{output:?}");
+            .expect("spawn ream generate:key")
     }
 
     fn read(&self, rel: &str) -> String {
@@ -87,4 +91,79 @@ fn no_example_is_created_where_the_project_has_none() {
     let p = TempProject::new("none");
     p.generate(&[]);
     assert!(!p.path.join(".env.example").exists());
+}
+
+#[cfg(unix)]
+fn mode_of(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).expect("stat").permissions().mode() & 0o777
+}
+
+/// The file holds the key that signs every cookie and session: no other
+/// local account may read it, whatever the umask says.
+#[cfg(unix)]
+#[test]
+fn a_created_env_is_readable_by_its_owner_only() {
+    let p = TempProject::new("mode-created");
+    p.generate(&[]);
+    assert_eq!(mode_of(&p.path.join(".env")), 0o600);
+}
+
+/// An existing file keeps the mode its owner gave it.
+#[cfg(unix)]
+#[test]
+fn an_existing_env_keeps_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let p = TempProject::new("mode-kept");
+    let env = p.path.join(".env");
+    std::fs::write(&env, "PORT=3000\n").unwrap();
+    std::fs::set_permissions(&env, std::fs::Permissions::from_mode(0o640)).unwrap();
+    p.generate(&[]);
+    assert_eq!(mode_of(&env), 0o640);
+    assert!(key_in(&p.read(".env")).is_some());
+}
+
+/// A cloned repository controls both names: a link must not carry the write
+/// into a file elsewhere in the user's account.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_env_is_refused_and_its_target_untouched() {
+    let p = TempProject::new("link-env");
+    let victim = p.path.join("victim");
+    std::fs::write(&victim, "Host *\n  ServerAliveInterval 60\n").unwrap();
+    std::os::unix::fs::symlink(&victim, p.path.join(".env")).unwrap();
+
+    let output = p.run(&[]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains(".env"));
+    assert_eq!(p.read("victim"), "Host *\n  ServerAliveInterval 60\n");
+}
+
+/// The example is checked before `.env` is written, so a refusal writes
+/// nothing at all.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_example_is_refused_before_anything_is_written() {
+    let p = TempProject::new("link-example");
+    let victim = p.path.join("victim");
+    std::fs::write(&victim, "export PATH=/usr/bin\n").unwrap();
+    std::os::unix::fs::symlink(&victim, p.path.join(".env.example")).unwrap();
+
+    let output = p.run(&[]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains(".env.example"));
+    assert_eq!(p.read("victim"), "export PATH=/usr/bin\n");
+    assert!(!p.path.join(".env").exists());
+}
+
+/// Not a regular file: a FIFO would block the read forever, a directory
+/// cannot be written.
+#[cfg(unix)]
+#[test]
+fn an_env_that_is_not_a_regular_file_is_refused() {
+    let p = TempProject::new("not-regular");
+    std::fs::create_dir(p.path.join(".env")).unwrap();
+    let output = p.run(&[]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not a regular file"));
 }

@@ -163,6 +163,19 @@ fn calls(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+/// The new project's `.env` holds its APP_KEY: readable by its owner only.
+#[cfg(unix)]
+#[test]
+fn the_env_file_is_created_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new("env-mode");
+    let path = recording_tools(&dir.path);
+    let output = ream_new(&dir.path, &path, &["demo"]);
+    assert!(output.status.success(), "{output:?}");
+    let meta = std::fs::metadata(dir.path.join("demo/.env")).unwrap();
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+}
+
 /// A monorepo scaffolds into `apps/api`, named `api`.
 #[cfg(unix)]
 #[test]
