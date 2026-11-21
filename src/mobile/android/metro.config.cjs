@@ -16,12 +16,21 @@ module.exports = mergeConfig(getDefaultConfig(projectRoot), {
   projectRoot,
   watchFolders: [...new Set([projectRoot, workspaceRoot])],
   resolver: {
-    // React Native's own condition first, then what ESM-only packages (the
-    // @c9up ones) publish: Metro asks for `react-native` alone by default, and
-    // an `import`-only subpath (`@c9up/orbit/react-native`) then fails.
-    unstable_conditionNames: ["react-native", "import", "require", "default"],
     resolveRequest(context, moduleName, platform) {
       if (moduleName === "@c9up/orbit-styles") return { type: "sourceFile", filePath: styles };
+      // @c9up packages are ESM-only: their exports name `import` (beside
+      // `react-native`), which Metro's default conditions miss, so an
+      // import-only subpath (`@c9up/orbit/react-native`) did not resolve.
+      // Asked for them alone: given `import` everywhere, Metro handed
+      // @babel/runtime's ESM helpers to CommonJS callers, and the bundle
+      // failed at start ("Object is not a function").
+      if (moduleName.startsWith("@c9up/")) {
+        return context.resolveRequest(
+          { ...context, unstable_conditionNames: ["react-native", "import", "default"] },
+          moduleName,
+          platform,
+        );
+      }
       return context.resolveRequest(context, moduleName, platform);
     },
   },

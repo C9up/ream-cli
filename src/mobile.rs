@@ -1788,7 +1788,7 @@ mod tests {
     }
 
     #[test]
-    fn metro_watches_the_workspace_and_asks_for_the_conditions_esm_packages_publish() {
+    fn metro_watches_the_workspace_and_asks_esm_packages_for_their_conditions() {
         let mono = temp("workspace");
         std::fs::write(mono.join("pnpm-workspace.yaml"), "packages: [apps/*]").unwrap();
         let app = mono.join("apps/mobile");
@@ -1807,7 +1807,10 @@ mod tests {
         };
         let config = metro_config(&layout);
         assert!(config.contains(&serde_json::to_string(&mono.to_string_lossy()).unwrap()));
-        assert!(config.contains(r#"["react-native", "import", "require", "default"]"#));
+        // `import` for @c9up's ESM-only packages alone: everywhere, it gave
+        // @babel/runtime's ESM helpers to CommonJS callers.
+        assert!(config.contains(r#"unstable_conditionNames: ["react-native", "import", "default"]"#));
+        assert!(config.contains(r#"moduleName.startsWith("@c9up/")"#));
         assert!(!config.contains("{{"));
     }
 
