@@ -669,6 +669,14 @@ impl Layout {
         if find_package(&self.root, "@react-native/metro-config").is_none() {
             missing.push(format!("@react-native/metro-config@{rn} (Metro)"));
         }
+        // Babel injects its helpers into every module it transpiles; React
+        // Native's preset wants the 7.x line (a bare `pnpm add` gives 8).
+        let runtime = find_package(&self.root, "@babel/runtime")
+            .and_then(|dir| package_json(&dir))
+            .and_then(|p| p.get("version").and_then(Value::as_str).map(str::to_string));
+        if !runtime.is_some_and(|v| v.starts_with("7.")) {
+            missing.push("@babel/runtime@7 (Babel's helpers)".to_string());
+        }
         if missing.is_empty() {
             return Ok(());
         }
@@ -1782,8 +1790,17 @@ mod tests {
             ),
             "{error}"
         );
+        assert!(error.contains("@babel/runtime@7"), "{error}");
         install(&root, "@react-native-community/cli", json!({}));
         install(&root, "@react-native/metro-config", json!({}));
+        // The 8.x line is not what React Native's Babel preset wants.
+        install(&root, "@babel/runtime", json!({ "version": "8.0.0" }));
+        assert!(Layout::new(&root)
+            .unwrap()
+            .check_tooling()
+            .unwrap_err()
+            .contains("@babel/runtime@7"));
+        install(&root, "@babel/runtime", json!({ "version": "7.29.15" }));
         Layout::new(&root).unwrap().check_tooling().unwrap();
     }
 
@@ -1809,8 +1826,11 @@ mod tests {
         assert!(config.contains(&serde_json::to_string(&mono.to_string_lossy()).unwrap()));
         // `import` for @c9up's ESM-only packages alone: everywhere, it gave
         // @babel/runtime's ESM helpers to CommonJS callers.
-        assert!(config.contains(r#"unstable_conditionNames: ["react-native", "import", "default"]"#));
+        assert!(
+            config.contains(r#"unstable_conditionNames: ["react-native", "import", "default"]"#)
+        );
         assert!(config.contains(r#"moduleName.startsWith("@c9up/")"#));
+        assert!(config.contains(r#"nodeModulesPaths: [path.join(projectRoot, "node_modules")]"#));
         assert!(!config.contains("{{"));
     }
 

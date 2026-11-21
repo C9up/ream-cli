@@ -16,6 +16,10 @@ module.exports = mergeConfig(getDefaultConfig(projectRoot), {
   projectRoot,
   watchFolders: [...new Set([projectRoot, workspaceRoot])],
   resolver: {
+    // A workspace package (linked from elsewhere in the monorepo) resolves
+    // what it does not declare from the app: @babel/runtime above all, which
+    // Babel injects into every module it transpiles.
+    nodeModulesPaths: [path.join(projectRoot, "node_modules")],
     resolveRequest(context, moduleName, platform) {
       if (moduleName === "@c9up/orbit-styles") return { type: "sourceFile", filePath: styles };
       // @c9up packages are ESM-only: their exports name `import` (beside
