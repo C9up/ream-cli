@@ -12,6 +12,7 @@ mod doctor;
 mod envfile;
 mod mcp;
 mod mobile;
+mod opener;
 mod scaffold;
 mod template;
 mod tools;

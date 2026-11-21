@@ -438,6 +438,9 @@ pub fn run_dev(clear_screen: bool, assets_flags: &crate::dev::AssetsFlags) -> Re
 
     let assets = read_assets_config()?;
     assets_flags.warn_if_unused(assets.dev_server.as_ref(), "devServer");
+    // Where the server leaves an address for `o` to open (see `opener`). Set
+    // before any thread exists, since it sets an environment variable.
+    crate::opener::start();
     // From here on a signal to `ream dev` is passed on to its children rather
     // than ending it and leaving them running.
     crate::dev::install_signal_handlers();
@@ -445,6 +448,7 @@ pub fn run_dev(clear_screen: bool, assets_flags: &crate::dev::AssetsFlags) -> Re
     crate::dev::start_keyboard();
     let outcome = run_dev_children(assets, assets_flags);
     crate::dev::restore_keyboard();
+    crate::opener::stop();
     outcome
 }
 
