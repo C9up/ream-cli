@@ -4,6 +4,9 @@ const path = require("node:path");
 const { getDefaultConfig, mergeConfig } = require("@react-native/metro-config");
 
 const projectRoot = path.resolve(__dirname, "..");
+// The workspace the app is in (the app itself outside a monorepo): packages
+// linked from elsewhere in it are watched too.
+const workspaceRoot = {{workspaceRoot}};
 
 // The app's style table (`ream css:compile` over its Tailwind build), which
 // @c9up/orbit's app entry imports as `@c9up/orbit-styles`.
@@ -11,8 +14,12 @@ const styles = path.join(__dirname, "orbit-styles.json");
 
 module.exports = mergeConfig(getDefaultConfig(projectRoot), {
   projectRoot,
-  watchFolders: [projectRoot],
+  watchFolders: [...new Set([projectRoot, workspaceRoot])],
   resolver: {
+    // React Native's own condition first, then what ESM-only packages (the
+    // @c9up ones) publish: Metro asks for `react-native` alone by default, and
+    // an `import`-only subpath (`@c9up/orbit/react-native`) then fails.
+    unstable_conditionNames: ["react-native", "import", "require", "default"],
     resolveRequest(context, moduleName, platform) {
       if (moduleName === "@c9up/orbit-styles") return { type: "sourceFile", filePath: styles };
       return context.resolveRequest(context, moduleName, platform);

@@ -308,6 +308,11 @@ pub struct NativePackage {
     /// A static `(Context) -> String?` that picks the JS bundle to launch
     /// (`reamNative.android.bundleProvider`, as `pkg.Class.method`).
     pub bundle_provider: Option<String>,
+    /// A static `(Application) -> Unit` the app calls when it starts, before
+    /// React Native loads (`reamNative.android.initializer`, as
+    /// `pkg.Class.method`): where a package's native code gets the app's
+    /// `Context` when it has no view or module to receive it.
+    pub initializer: Option<String>,
     pub specs: Option<PathBuf>,
     /// (Cargo.toml, library name)
     pub rust: Vec<(PathBuf, String)>,
@@ -344,6 +349,25 @@ fn inside(root: &Path, relative: &str, what: &str, package: &str) -> Result<Path
         ));
     }
     Ok(root.join(relative))
+}
+
+/// A `package.Class.method` a package names for the app to call: written
+/// into the generated Kotlin, so nothing but identifiers.
+fn static_method(package: &str, what: &str, value: String) -> Result<String, String> {
+    let parts: Vec<&str> = value.split('.').collect();
+    let identifier = |s: &&str| {
+        let mut chars = s.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if parts.len() < 3 || !parts.iter().all(identifier) {
+        return Err(format!(
+            "{package}: reamNative.android.{what} {value:?} is not package.Class.method"
+        ));
+    }
+    Ok(value)
 }
 
 fn native_of(name: &str, root: &Path, pkg: &Value) -> Result<Option<NativePackage>, String> {
@@ -398,20 +422,10 @@ fn native_of(name: &str, root: &Path, pkg: &Value) -> Result<Option<NativePackag
             out.cmake = Some((inside(root, &file, "android.cmake.file", name)?, link));
         }
         if let Some(provider) = text(android, "bundleProvider") {
-            let parts: Vec<&str> = provider.split('.').collect();
-            let identifier = |s: &&str| {
-                let mut chars = s.chars();
-                chars
-                    .next()
-                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-            };
-            if parts.len() < 3 || !parts.iter().all(identifier) {
-                return Err(format!(
-                    "{name}: reamNative.android.bundleProvider {provider:?} is not package.Class.method"
-                ));
-            }
-            out.bundle_provider = Some(provider);
+            out.bundle_provider = Some(static_method(name, "bundleProvider", provider)?);
+        }
+        if let Some(initializer) = text(android, "initializer") {
+            out.initializer = Some(static_method(name, "initializer", initializer)?);
         }
         for module in android
             .get("cxxModules")
@@ -559,13 +573,48 @@ fn write(path: &Path, contents: &[u8]) -> Result<(), String> {
     std::fs::write(path, contents).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// The outermost directory above `root` (or `root` itself) that is a
+/// workspace root: a `pnpm-workspace.yaml`, or a package.json declaring
+/// `workspaces`. Without one, `root`.
+fn workspace_root(root: &Path) -> PathBuf {
+    root.ancestors()
+        .filter(|dir| {
+            dir.join("pnpm-workspace.yaml").is_file()
+                || package_json(dir).is_some_and(|p| p.get("workspaces").is_some())
+        })
+        .last()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root.to_path_buf())
+}
+
+/// Metro's configuration for the app: its entry from the project root, the
+/// workspace watched, the export conditions our packages publish.
+fn metro_config(layout: &Layout) -> String {
+    fill(
+        T_METRO,
+        &[(
+            "workspaceRoot",
+            serde_json::to_string(&layout.workspace.to_string_lossy()).unwrap_or_default(),
+        )],
+    )
+}
+
 /// The directories `ream android:*` writes under the project.
 pub struct Layout {
     pub root: PathBuf,
     pub ream: PathBuf,
     pub android: PathBuf,
     pub rust: PathBuf,
+    /// The directory react-native really sits in (its link followed): its own
+    /// dependencies — the Gradle plugin, codegen, Hermes' compiler — are
+    /// there, which an app under pnpm's isolated linker does not see.
     pub node_modules: PathBuf,
+    /// The app's React Native CLI (autolinking runs it).
+    pub community_cli: Option<PathBuf>,
+    /// The outermost workspace the app belongs to (a pnpm or npm/yarn
+    /// workspace root), else the app: what Metro watches, so packages linked
+    /// from elsewhere in the monorepo resolve.
+    pub workspace: PathBuf,
 }
 
 impl Layout {
@@ -575,7 +624,8 @@ impl Layout {
             .map_err(|e| format!("{}: {e}", root.display()))?;
         let rn = find_package(&root, "react-native")
             .ok_or("react-native is not installed: add it to the app's dependencies")?;
-        // The node_modules holding react-native: its tooling lives beside it.
+        // The node_modules really holding react-native: its tooling lives beside it.
+        let rn = rn.canonicalize().unwrap_or(rn);
         let node_modules = rn
             .parent()
             .map(Path::to_path_buf)
@@ -584,10 +634,53 @@ impl Layout {
         Ok(Layout {
             android: ream.join("android"),
             rust: ream.join("rust"),
+            community_cli: find_package(&root, "@react-native-community/cli"),
+            workspace: workspace_root(&root),
             ream,
             root,
             node_modules,
         })
+    }
+
+    /// What the build needs and the app does not have, as one message naming
+    /// the install that fixes it — before anything is generated or compiled,
+    /// rather than from deep inside Gradle.
+    pub fn check_tooling(&self) -> Result<(), String> {
+        let rn = package_json(&self.node_modules.join("react-native"))
+            .and_then(|p| p.get("version").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_default();
+        let mut missing = Vec::new();
+        for (package, what) in [
+            ("@react-native/gradle-plugin", "the Gradle plugin"),
+            ("@react-native/codegen", "codegen"),
+        ] {
+            if !self
+                .node_modules
+                .join(package)
+                .join("package.json")
+                .is_file()
+            {
+                missing.push(format!("{package}@{rn} ({what})"));
+            }
+        }
+        if self.community_cli.is_none() {
+            missing.push("@react-native-community/cli (autolinking)".to_string());
+        }
+        if find_package(&self.root, "@react-native/metro-config").is_none() {
+            missing.push(format!("@react-native/metro-config@{rn} (Metro)"));
+        }
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let names = missing
+            .iter()
+            .map(|m| m.split(' ').next().unwrap_or(m).to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Err(format!(
+            "The Android build needs packages this app does not have:\n  - {}\nInstall them: pnpm add -D {names}",
+            missing.join("\n  - ")
+        ))
     }
 }
 
@@ -599,7 +692,9 @@ impl Layout {
 /// Tailwind installed the table is empty: every class is reported unknown.
 fn styles(layout: &Layout, config: &MobileConfig) -> Result<(), String> {
     let out = layout.ream.join("orbit-styles.json");
-    let bin = layout.node_modules.join(".bin").join("tailwindcss");
+    // The app's own Tailwind, from its node_modules (not react-native's).
+    let bin = crate::tools::local_bin(&layout.root, "tailwindcss")
+        .unwrap_or_else(|| layout.root.join("node_modules/.bin/tailwindcss"));
     if !bin.exists() {
         if config.css.is_some() {
             return Err("mobile.css is set but Tailwind is not installed: pnpm add -D tailwindcss @tailwindcss/cli".into());
@@ -688,6 +783,15 @@ pub fn generate(
             )
         })
         .unwrap_or_default();
+    // Each package's start hook, in the packages' order, before React Native loads.
+    let initializers = natives
+        .iter()
+        .filter_map(|n| {
+            n.initializer
+                .as_deref()
+                .map(|method| format!("    // {}\n    {method}(this)\n", n.name))
+        })
+        .collect::<String>();
     let a = &layout.android;
     let gradle_name: String = config
         .name
@@ -715,6 +819,14 @@ pub fn generate(
         ("projectRoot", gradle_path(&layout.root)),
         ("reamDir", gradle_path(&layout.ream)),
         ("nodeModules", gradle_path(&layout.node_modules)),
+        (
+            "communityCli",
+            layout
+                .community_cli
+                .as_deref()
+                .map(gradle_path)
+                .unwrap_or_default(),
+        ),
         ("gradleName", gradle_name.clone()),
         ("minSdk", MIN_SDK.to_string()),
         ("ndkVersion", ndk_version.to_string()),
@@ -725,6 +837,7 @@ pub fn generate(
         ("entry", gradle_path(&layout.root.join(&config.entry))),
         ("mainModule", main_module(&config.entry)),
         ("bundleFile", bundle_file),
+        ("initializers", initializers),
         (
             "networkSecurity",
             if cleartext_update_host(config).is_some() {
@@ -855,7 +968,10 @@ pub fn generate(
         &main.join("res/mipmap-xxxhdpi/ic_launcher_round.png"),
         &round,
     )?;
-    write(&layout.ream.join("metro.config.cjs"), T_METRO.as_bytes())?;
+    write(
+        &layout.ream.join("metro.config.cjs"),
+        metro_config(layout).as_bytes(),
+    )?;
     styles(layout, config)?;
     // Android refuses plain http in a release build: an update server on
     // this computer (or the emulator's host) is let through, and only it.
@@ -1136,6 +1252,7 @@ pub fn build(
         }
     }
     let layout = Layout::new(root)?;
+    layout.check_tooling()?;
     let natives = native_packages(&layout.root)?;
     let ndk = find_ndk(
         &|k| std::env::var(k).ok(),
@@ -1269,10 +1386,15 @@ pub fn run_on_device(release: bool, requested: Option<&str>) -> Result<(), Strin
         );
         return Err(install_failure(&said));
     }
+    // The debug build fetches its JS from Metro on the computer, and asks the
+    // phone's port 8081 for it: Metro takes 8081 when it is free, else the
+    // next free port — another app's Metro may hold 8081, and answering its
+    // status probe, it used to be taken for ours — and adb maps 8081 to it.
+    let port = if release { METRO_PORT } else { metro_port() };
     if !release {
-        // The debug build fetches its JS from Metro on the computer.
         let _ = adb()
-            .args(["-s", &serial, "reverse", "tcp:8081", "tcp:8081"])
+            .args(["-s", &serial, "reverse", "tcp:8081"])
+            .arg(format!("tcp:{port}"))
             .status();
     }
     let activity = format!("{}/.MainActivity", config.id);
@@ -1291,13 +1413,20 @@ pub fn run_on_device(release: bool, requested: Option<&str>) -> Result<(), Strin
     let mut metro = Command::new("node")
         .current_dir(&layout.root)
         .arg(layout.node_modules.join("react-native/cli.js"))
-        .args(["start", "--config"])
+        .args(["start", "--port", &port.to_string(), "--config"])
         .arg(layout.ream.join("metro.config.cjs"))
         .spawn()
         .map_err(|e| format!("Metro: {e}"))?;
-    if !wait_for_metro(std::time::Duration::from_secs(60)) {
+    if port != METRO_PORT {
+        crate::ui::info(&format!(
+            "Port {METRO_PORT} is taken: Metro serves on {port} (the phone still asks 8081)"
+        ));
+    }
+    if !wait_for_metro(port, std::time::Duration::from_secs(60)) {
         let _ = metro.kill();
-        return Err("Metro did not answer on localhost:8081 within a minute".into());
+        return Err(format!(
+            "Metro did not answer on localhost:{port} within a minute"
+        ));
     }
     launch()?;
     crate::ui::success(&format!(
@@ -1311,12 +1440,22 @@ pub fn run_on_device(release: bool, requested: Option<&str>) -> Result<(), Strin
     Ok(())
 }
 
-/// Whether Metro answers its status probe before `timeout`.
-fn wait_for_metro(timeout: std::time::Duration) -> bool {
+/// The port the phone asks for its JS (React Native's default dev server port).
+const METRO_PORT: u16 = 8081;
+
+/// A free port for Metro: 8081 when nothing listens on it, else the next free one.
+fn metro_port() -> u16 {
+    (METRO_PORT..METRO_PORT + 100)
+        .find(|port| std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok())
+        .unwrap_or(METRO_PORT)
+}
+
+/// Whether Metro answers its status probe on `port` before `timeout`.
+fn wait_for_metro(port: u16, timeout: std::time::Duration) -> bool {
     use std::io::{Read, Write};
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
-        if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", 8081)) {
+        if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
             let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
             let mut reply = String::new();
             if stream
@@ -1464,7 +1603,10 @@ pub fn run_publish(key_file: Option<&str>) -> Result<(), String> {
     let layout = Layout::new(&root)?;
     let natives = native_packages(&layout.root)?;
     let runtime = runtime_version(&layout, &natives);
-    write(&layout.ream.join("metro.config.cjs"), T_METRO.as_bytes())?;
+    write(
+        &layout.ream.join("metro.config.cjs"),
+        metro_config(&layout).as_bytes(),
+    )?;
     styles(&layout, &config)?;
     let work = layout.ream.join("publish");
     if work.exists() {
@@ -1573,6 +1715,109 @@ pub fn run_publish(key_file: Option<&str>) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_package_s_start_hook_runs_before_react_native_loads() {
+        let root = project("initializer");
+        install(
+            &root,
+            "pkg",
+            json!({ "reamNative": { "android": { "initializer": "com.example.Pkg.init" } } }),
+        );
+        let pkg = root.join("node_modules/pkg");
+        let native = native_of("pkg", &pkg, &package_json(&pkg).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(native.initializer.as_deref(), Some("com.example.Pkg.init"));
+        // Written into Kotlin: nothing but identifiers.
+        install(
+            &root,
+            "bad",
+            json!({ "reamNative": { "android": { "initializer": "x.y.z(); evil" } } }),
+        );
+        let bad = root.join("node_modules/bad");
+        assert!(native_of("bad", &bad, &package_json(&bad).unwrap())
+            .unwrap_err()
+            .contains("is not package.Class.method"));
+    }
+
+    // A symlink, as pnpm makes it: Unix here (Windows CI compiles the tests).
+    #[cfg(unix)]
+    #[test]
+    fn finds_react_native_s_tooling_behind_pnpm_s_link_and_names_what_is_missing() {
+        let root = project("tooling");
+        // pnpm's isolated linker: react-native and its own dependencies in the
+        // store, only a link to react-native in the app's node_modules.
+        let store = root.join("node_modules/.pnpm/react-native@0.87.1/node_modules");
+        for name in [
+            "react-native",
+            "@react-native/gradle-plugin",
+            "@react-native/codegen",
+        ] {
+            std::fs::create_dir_all(store.join(name)).unwrap();
+            std::fs::write(
+                store.join(name).join("package.json"),
+                json!({ "version": "0.87.1" }).to_string(),
+            )
+            .unwrap();
+        }
+        std::os::unix::fs::symlink(
+            store.join("react-native"),
+            root.join("node_modules/react-native"),
+        )
+        .unwrap();
+        let layout = Layout::new(&root).unwrap();
+        assert_eq!(layout.node_modules, store.canonicalize().unwrap());
+        // The app's own tooling is still missing: named at once, with the install.
+        let error = layout.check_tooling().unwrap_err();
+        assert!(error.contains("@react-native-community/cli"), "{error}");
+        assert!(
+            error.contains("@react-native/metro-config@0.87.1"),
+            "{error}"
+        );
+        assert!(!error.contains("gradle-plugin"), "{error}");
+        assert!(
+            error.contains(
+                "pnpm add -D @react-native-community/cli @react-native/metro-config@0.87.1"
+            ),
+            "{error}"
+        );
+        install(&root, "@react-native-community/cli", json!({}));
+        install(&root, "@react-native/metro-config", json!({}));
+        Layout::new(&root).unwrap().check_tooling().unwrap();
+    }
+
+    #[test]
+    fn metro_watches_the_workspace_and_asks_for_the_conditions_esm_packages_publish() {
+        let mono = temp("workspace");
+        std::fs::write(mono.join("pnpm-workspace.yaml"), "packages: [apps/*]").unwrap();
+        let app = mono.join("apps/mobile");
+        std::fs::create_dir_all(&app).unwrap();
+        assert_eq!(workspace_root(&app), mono);
+        let alone = temp("alone");
+        assert_eq!(workspace_root(&alone), alone);
+        let layout = Layout {
+            root: app.clone(),
+            ream: app.join(".ream"),
+            android: app.join(".ream/android"),
+            rust: app.join(".ream/rust"),
+            node_modules: app.join("node_modules"),
+            community_cli: None,
+            workspace: mono.clone(),
+        };
+        let config = metro_config(&layout);
+        assert!(config.contains(&serde_json::to_string(&mono.to_string_lossy()).unwrap()));
+        assert!(config.contains(r#"["react-native", "import", "require", "default"]"#));
+        assert!(!config.contains("{{"));
+    }
+
+    #[test]
+    fn metro_takes_the_next_free_port_when_8081_is_held() {
+        let port = metro_port();
+        let held = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        assert_ne!(metro_port(), port);
+        drop(held);
+    }
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ream-mobile-{name}-{}", std::process::id()));
@@ -1760,6 +2005,7 @@ mod tests {
                 name: "NativeOrbit".into(),
                 header: "NativeOrbit.h".into(),
             }],
+            initializer: Some("com.c9up.orbit.OrbitHost.start".into()),
             ..NativePackage::default()
         }];
         let config = MobileConfig {
@@ -1784,11 +2030,16 @@ mod tests {
             android: root.join(".ream/android"),
             rust: root.join(".ream/rust"),
             node_modules: root.join("node_modules"),
+            community_cli: None,
+            workspace: root.clone(),
         };
         generate(&layout, &config, &natives, "27.1.12297006").unwrap();
         let read = |p: &str| std::fs::read_to_string(layout.android.join(p)).unwrap();
         let app = read("app/build.gradle");
         assert!(app.contains("applicationId \"ch.c9up.tessel\""));
+        let main = read("app/src/main/java/ch/c9up/tessel/MainApplication.kt");
+        let hook = main.find("com.c9up.orbit.OrbitHost.start(this)").unwrap();
+        assert!(hook < main.find("loadReactNative(this)").unwrap());
         assert!(app.contains("versionCode 7"));
         assert!(app.contains("android/src/main/java\""));
         assert!(app.contains("REAM_RUST_DIR="));
@@ -1903,6 +2154,8 @@ mod tests {
             android: root.join(".ream/android"),
             rust: root.join(".ream/rust"),
             node_modules: root.join("node_modules"),
+            community_cli: None,
+            workspace: root.clone(),
         };
         install(&root, "react-native", json!({ "version": "0.87.1" }));
         let native = |name: &str, version: &str| NativePackage {
@@ -1962,6 +2215,8 @@ mod tests {
             android: root.join(".ream/android"),
             rust: root.join(".ream/rust"),
             node_modules: root.join("node_modules"),
+            community_cli: None,
+            workspace: root.clone(),
         };
         let orbit = NativePackage {
             name: "@c9up/orbit".into(),

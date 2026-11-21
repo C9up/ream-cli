@@ -20,6 +20,7 @@ class MainApplication : Application(), ReactApplication {
 
   override fun onCreate() {
     super.onCreate()
-    loadReactNative(this)
+    // Native packages' start hooks (their reamNative.android.initializer).
+{{initializers}}    loadReactNative(this)
   }
 }
