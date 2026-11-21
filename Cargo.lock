@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "ream-cli"
-version = "0.3.22"
+version = "0.3.23"
 dependencies = [
  "base64",
  "clap",
