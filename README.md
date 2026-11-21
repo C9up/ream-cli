@@ -53,6 +53,8 @@ ream list                             # every command — this binary's and the 
 # Mobile (reamrc.ts `mobile` block)
 ream android:run                      # build, install and start on a device; Metro reloads the JS
 ream android:build --release          # a signed APK (--aab for the Play Store)
+ream android:publish                  # an over-the-air update (@c9up/robledo), signed
+ream generate:update-key              # the key pair updates are signed with
 
 # Diagnostics
 ream doctor                           # environment health checks

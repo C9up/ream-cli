@@ -15,7 +15,7 @@ class MainApplication : Application(), ReactApplication {
       packageList = PackageList(this).packages,
       // The entry Metro serves in a debug build (reamrc.ts's mobile.entry).
       jsMainModulePath = "{{mainModule}}",
-    )
+{{bundleFile}}    )
   }
 
   override fun onCreate() {

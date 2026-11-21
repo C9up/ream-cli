@@ -267,6 +267,26 @@ enum Commands {
         device: Option<String>,
     },
 
+    /// Bundle, sign and publish the app's JS as an over-the-air update
+    /// (@c9up/robledo) for its current native runtime
+    #[command(name = "android:publish")]
+    AndroidPublish {
+        /// The signing key's file, when REAM_UPDATES_KEY is not set (default robledo.key)
+        #[arg(long)]
+        key: Option<String>,
+    },
+
+    /// Generate the Ed25519 key pair over-the-air updates are signed with
+    #[command(name = "generate:update-key")]
+    GenerateUpdateKey {
+        /// Where to write the private key (default robledo.key)
+        #[arg(long)]
+        out: Option<String>,
+        /// Replace an existing key (installed apps then refuse updates until rebuilt)
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+
     /// Open an interactive shell with the application booted
     Repl,
 
@@ -596,6 +616,8 @@ fn main() {
         Commands::GenerateKey { force, show } => commands::run_generate_key(force, show),
         Commands::AndroidBuild { release, aab } => mobile::run_build(release || aab, aab),
         Commands::AndroidRun { release, device } => mobile::run_on_device(release, device.as_deref()),
+        Commands::AndroidPublish { key } => mobile::run_publish(key.as_deref()),
+        Commands::GenerateUpdateKey { out, force } => mobile::run_generate_update_key(out.as_deref(), force),
         Commands::Repl => commands::run_repl(),
         Commands::Info => commands::info(),
         Commands::List { namespaces, json } => {

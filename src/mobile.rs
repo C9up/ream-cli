@@ -22,7 +22,9 @@ use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use base64::Engine;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::tools::find_package;
 
@@ -38,6 +40,15 @@ pub struct Signing {
     pub alias: String,
 }
 
+/// Over-the-air updates (@c9up/robledo): where the app asks, the key it
+/// checks updates against, and where `android:publish` writes them.
+#[derive(Debug, PartialEq)]
+pub struct Updates {
+    pub url: String,
+    pub public_key: String,
+    pub directory: PathBuf,
+}
+
 #[derive(Debug, PartialEq)]
 pub struct MobileConfig {
     pub name: String,
@@ -49,6 +60,7 @@ pub struct MobileConfig {
     pub permissions: Vec<String>,
     pub abis: Vec<String>,
     pub signing: Option<Signing>,
+    pub updates: Option<Updates>,
 }
 
 fn string(value: &Value, key: &str) -> Result<Option<String>, String> {
@@ -177,6 +189,35 @@ pub fn parse_config(rc: &Value, root: &Path) -> Result<MobileConfig, String> {
         }),
         Some(_) => return Err("mobile.android.signing must be { keystore, alias }".into()),
     };
+    let updates = match mobile.get("updates") {
+        None | Some(Value::Null) => None,
+        Some(u) if u.is_object() => {
+            let url = string(u, "url")?.ok_or("mobile.updates.url is required")?;
+            if !update_url_allowed(&url) {
+                return Err(format!(
+                    "mobile.updates.url {url:?} must be https (plain http only to this computer: localhost, 127.0.0.1, 10.0.2.2)"
+                ));
+            }
+            let public_key = string(u, "publicKey")?
+                .ok_or("mobile.updates.publicKey is required (ream generate:update-key)")?;
+            let decoded: [u8; 32] = base64::engine::general_purpose::STANDARD
+                .decode(public_key.trim())
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or("mobile.updates.publicKey is not a base64 Ed25519 public key (ream generate:update-key prints one)")?;
+            if ed25519_dalek::VerifyingKey::from_bytes(&decoded).is_err() {
+                return Err("mobile.updates.publicKey is not a valid Ed25519 public key".into());
+            }
+            let directory =
+                PathBuf::from(string(u, "directory")?.unwrap_or_else(|| "robledo".to_string()));
+            Some(Updates {
+                url: url.trim_end_matches('/').to_string(),
+                public_key: public_key.trim().to_string(),
+                directory,
+            })
+        }
+        Some(_) => return Err("mobile.updates must be { url, publicKey }".into()),
+    };
     Ok(MobileConfig {
         name,
         id,
@@ -187,7 +228,29 @@ pub fn parse_config(rc: &Value, root: &Path) -> Result<MobileConfig, String> {
         permissions,
         abis,
         signing,
+        updates,
     })
+}
+
+/// An update server over https, or plain http to the computer the phone is
+/// plugged into (adb reverse) or an emulator's host. The updates are signed
+/// either way; https keeps who asks for what private.
+fn update_url_allowed(url: &str) -> bool {
+    if url.starts_with("https://") && url.len() > "https://".len() {
+        return true;
+    }
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let host = rest.split(['/', ':']).next().unwrap_or("");
+    matches!(host, "localhost" | "127.0.0.1" | "10.0.2.2")
+}
+
+/// The host of a plain-http update URL (one `update_url_allowed` let
+/// through), which the app must be allowed to reach in clear.
+fn cleartext_update_host(config: &MobileConfig) -> Option<String> {
+    let rest = config.updates.as_ref()?.url.strip_prefix("http://")?;
+    rest.split(['/', ':']).next().map(str::to_string)
 }
 
 /// The rc file's `mobile` block. Node reads it: `reamrc.ts` is TypeScript
@@ -232,6 +295,10 @@ pub struct CxxModule {
 #[derive(Debug, Default)]
 pub struct NativePackage {
     pub name: String,
+    pub version: String,
+    /// A static `(Context) -> String?` that picks the JS bundle to launch
+    /// (`reamNative.android.bundleProvider`, as `pkg.Class.method`).
+    pub bundle_provider: Option<String>,
     pub specs: Option<PathBuf>,
     /// (Cargo.toml, library name)
     pub rust: Vec<(PathBuf, String)>,
@@ -277,6 +344,11 @@ fn native_of(name: &str, root: &Path, pkg: &Value) -> Result<Option<NativePackag
     let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).map(str::to_string);
     let mut out = NativePackage {
         name: name.to_string(),
+        version: pkg
+            .get("version")
+            .and_then(Value::as_str)
+            .unwrap_or("0.0.0")
+            .to_string(),
         ..NativePackage::default()
     };
     if let Some(specs) = text(native, "specs") {
@@ -315,6 +387,22 @@ fn native_of(name: &str, root: &Path, pkg: &Value) -> Result<Option<NativePackag
                 ));
             }
             out.cmake = Some((inside(root, &file, "android.cmake.file", name)?, link));
+        }
+        if let Some(provider) = text(android, "bundleProvider") {
+            let parts: Vec<&str> = provider.split('.').collect();
+            let identifier = |s: &&str| {
+                let mut chars = s.chars();
+                chars
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            };
+            if parts.len() < 3 || !parts.iter().all(identifier) {
+                return Err(format!(
+                    "{name}: reamNative.android.bundleProvider {provider:?} is not package.Class.method"
+                ));
+            }
+            out.bundle_provider = Some(provider);
         }
         for module in android
             .get("cxxModules")
@@ -374,6 +462,25 @@ pub fn native_packages(root: &Path) -> Result<Vec<NativePackage>, String> {
     }
     found.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(found)
+}
+
+/// The native runtime an update must match: React Native's version and every
+/// native package's name and version. JS built against another set may call
+/// native code this build lacks, so a phone refuses it and waits for a store
+/// update (@c9up/robledo checks it; `android:publish` stamps it).
+pub fn runtime_version(layout: &Layout, natives: &[NativePackage]) -> String {
+    let rn = package_json(&layout.node_modules.join("react-native"))
+        .and_then(|p| p.get("version").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_default();
+    let mut parts = vec![format!("react-native@{rn}")];
+    let mut packages: Vec<String> = natives
+        .iter()
+        .map(|n| format!("{}@{}", n.name, n.version))
+        .collect();
+    packages.sort();
+    parts.extend(packages);
+    let digest = Sha256::digest(parts.join("\n").as_bytes());
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
 // ---------------------------------------------------------------- generation
@@ -485,6 +592,36 @@ pub fn generate(
     if !natives.iter().any(|n| n.name == "@c9up/orbit") {
         return Err("@c9up/orbit is not installed: a ream mobile app renders through it".into());
     }
+    let providers: Vec<(&str, &str)> = natives
+        .iter()
+        .filter_map(|n| n.bundle_provider.as_deref().map(|p| (n.name.as_str(), p)))
+        .collect();
+    if providers.len() > 1 {
+        return Err(format!(
+            "Several packages pick the JS bundle to launch ({}): keep one",
+            providers
+                .iter()
+                .map(|(n, _)| *n)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if config.updates.is_some() && providers.is_empty() {
+        return Err(
+            "mobile.updates is set but no installed package applies updates: add @c9up/robledo"
+                .into(),
+        );
+    }
+    // Called in every build so the package can open its state; its choice
+    // is used in release builds only (a debug build loads its JS from Metro).
+    let bundle_file = providers
+        .first()
+        .map(|(name, provider)| {
+            format!(
+                "      // {name}: the bundle to launch, an update or the app's own.\n      jsBundleFilePath = {provider}(applicationContext).takeUnless {{ BuildConfig.DEBUG }},\n"
+            )
+        })
+        .unwrap_or_default();
     let a = &layout.android;
     let gradle_name: String = config
         .name
@@ -521,6 +658,15 @@ pub fn generate(
         ("build", config.build.to_string()),
         ("entry", gradle_path(&layout.root.join(&config.entry))),
         ("mainModule", main_module(&config.entry)),
+        ("bundleFile", bundle_file),
+        (
+            "networkSecurity",
+            if cleartext_update_host(config).is_some() {
+                "\n      android:networkSecurityConfig=\"@xml/ream_network_security\"".to_string()
+            } else {
+                String::new()
+            },
+        ),
         ("metroConfig", gradle_path(&layout.ream.join("metro.config.cjs"))),
         ("javaDirs", java_dirs),
         ("rustDir", gradle_path(&layout.rust)),
@@ -644,6 +790,37 @@ pub fn generate(
         &round,
     )?;
     write(&layout.ream.join("metro.config.cjs"), T_METRO.as_bytes())?;
+    // Android refuses plain http in a release build: an update server on
+    // this computer (or the emulator's host) is let through, and only it.
+    let security = main.join("res/xml/ream_network_security.xml");
+    match cleartext_update_host(config) {
+        Some(host) => {
+            let xml = format!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!-- Generated by `ream android:*`: plain http to the local update server only. -->\n<network-security-config>\n  <domain-config cleartextTrafficPermitted=\"true\">\n    <domain includeSubdomains=\"false\">{}</domain>\n  </domain-config>\n</network-security-config>\n",
+                xml_escape(&host)
+            );
+            write(&security, xml.as_bytes())?;
+        }
+        None => {
+            let _ = std::fs::remove_file(&security);
+        }
+    }
+    // What the update package reads at the app's start (see @c9up/robledo).
+    let updates_config = main.join("assets/ream-updates.json");
+    match &config.updates {
+        Some(updates) => {
+            let value = serde_json::json!({
+                "url": updates.url,
+                "publicKey": updates.public_key,
+                "runtimeVersion": runtime_version(layout, natives),
+                "platform": "android",
+            });
+            write(&updates_config, value.to_string().as_bytes())?;
+        }
+        None => {
+            let _ = std::fs::remove_file(&updates_config);
+        }
+    }
     write(
         &layout.ream.join("react-native.config.js"),
         fill(T_RN_CONFIG, &values).as_bytes(),
@@ -1089,6 +1266,241 @@ fn wait_for_metro(timeout: std::time::Duration) -> bool {
     false
 }
 
+// ---------------------------------------------------------------- over-the-air updates
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The 32-byte Ed25519 seed `android:publish` signs with: REAM_UPDATES_KEY
+/// (base64), else the key file.
+fn signing_key(key_file: &Path) -> Result<ed25519_dalek::SigningKey, String> {
+    let text = match std::env::var("REAM_UPDATES_KEY") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => std::fs::read_to_string(key_file).map_err(|e| {
+            format!(
+                "No update key: set REAM_UPDATES_KEY, or keep the key in {} (ream generate:update-key): {e}",
+                key_file.display()
+            )
+        })?,
+    };
+    let seed: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(text.trim())
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or("The update key is not a base64 32-byte Ed25519 seed")?;
+    Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
+}
+
+/// `ream generate:update-key`: a new key pair for signing updates.
+pub fn run_generate_update_key(out: Option<&str>, force: bool) -> Result<(), String> {
+    let path = PathBuf::from(out.unwrap_or("robledo.key"));
+    if path.exists() && !force {
+        return Err(format!(
+            "{} exists: a new key would make every installed app refuse the next update. --force replaces it",
+            path.display()
+        ));
+    }
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).map_err(|e| format!("No randomness from the system: {e}"))?;
+    let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(seed);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    use std::io::Write;
+    options
+        .open(&path)
+        .and_then(|mut file| file.write_all(format!("{encoded}\n").as_bytes()))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let public = base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
+    crate::ui::success(&format!(
+        "Wrote the update signing key to {} (readable by you only)",
+        path.display()
+    ));
+    println!("\n  mobile.updates.publicKey: '{public}'\n");
+    crate::ui::info(
+        "Put the public key in reamrc.ts. Keep the private key out of git (add it to .gitignore); on CI, pass it as REAM_UPDATES_KEY.",
+    );
+    Ok(())
+}
+
+fn hermesc(node_modules: &Path) -> Result<PathBuf, String> {
+    let os = if cfg!(target_os = "macos") {
+        "osx-bin"
+    } else if cfg!(target_os = "windows") {
+        "win64-bin"
+    } else {
+        "linux64-bin"
+    };
+    let name = if cfg!(target_os = "windows") {
+        "hermesc.exe"
+    } else {
+        "hermesc"
+    };
+    let path = node_modules
+        .join("hermes-compiler/hermesc")
+        .join(os)
+        .join(name);
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(format!(
+            "Hermes' compiler is missing ({}): reinstall react-native",
+            path.display()
+        ))
+    }
+}
+
+/// Every file under `dir`, as relative forward-slash paths, sorted.
+fn files_under(dir: &Path) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&at) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(relative) = path.strip_prefix(dir) {
+                out.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// `ream android:publish`: bundle the app's JS for its current native
+/// runtime, sign it, and write it where the app's ream server (robledo)
+/// serves it from. Installed apps of that runtime take it at their next start.
+pub fn run_publish(key_file: Option<&str>) -> Result<(), String> {
+    let root = std::env::current_dir().map_err(|e| e.to_string())?;
+    let config = read_config(&root)?;
+    let updates = config
+        .updates
+        .as_ref()
+        .ok_or("mobile.updates is not set in reamrc.ts: there is nowhere to publish to")?;
+    let key = signing_key(&root.join(key_file.unwrap_or("robledo.key")))?;
+    let public = base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
+    if public != updates.public_key {
+        return Err(
+            "This key does not match mobile.updates.publicKey: installed apps would refuse what it signs".into(),
+        );
+    }
+    let layout = Layout::new(&root)?;
+    let natives = native_packages(&layout.root)?;
+    let runtime = runtime_version(&layout, &natives);
+    write(&layout.ream.join("metro.config.cjs"), T_METRO.as_bytes())?;
+    let work = layout.ream.join("publish");
+    if work.exists() {
+        std::fs::remove_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
+    }
+    let files_dir = work.join("files");
+    std::fs::create_dir_all(&files_dir).map_err(|e| e.to_string())?;
+    crate::ui::info("Bundling the app's JS");
+    let js = work.join("index.android.bundle.js");
+    let status = Command::new("node")
+        .current_dir(&layout.root)
+        .arg(layout.node_modules.join("react-native/cli.js"))
+        .args([
+            "bundle",
+            "--platform",
+            "android",
+            "--dev",
+            "false",
+            "--minify",
+            "false",
+            "--entry-file",
+        ])
+        .arg(layout.root.join(&config.entry))
+        .arg("--bundle-output")
+        .arg(&js)
+        .arg("--assets-dest")
+        .arg(&files_dir)
+        .arg("--config")
+        .arg(layout.ream.join("metro.config.cjs"))
+        .status()
+        .map_err(|e| format!("Metro: {e}"))?;
+    if !status.success() {
+        return Err("Bundling the JS failed".into());
+    }
+    crate::ui::info("Compiling it for Hermes");
+    let status = Command::new(hermesc(&layout.node_modules)?)
+        .args(["-emit-binary", "-O", "-out"])
+        .arg(files_dir.join("index.android.bundle"))
+        .arg(&js)
+        .status()
+        .map_err(|e| format!("hermesc: {e}"))?;
+    if !status.success() {
+        return Err("Hermes could not compile the bundle".into());
+    }
+    let mut entries = Vec::new();
+    let mut bundle_digest = String::new();
+    for path in files_under(&files_dir)? {
+        let bytes = std::fs::read(files_dir.join(&path)).map_err(|e| format!("{path}: {e}"))?;
+        let digest = hex(&Sha256::digest(&bytes));
+        if path == "index.android.bundle" {
+            bundle_digest = digest.clone();
+        }
+        entries.push(serde_json::json!({ "path": path, "sha256": digest, "size": bytes.len() }));
+    }
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let id = format!("{created}-{}", bundle_digest.get(..8).unwrap_or("0"));
+    let manifest = serde_json::json!({
+        "id": id,
+        "createdAt": created,
+        "runtimeVersion": runtime,
+        "platform": "android",
+        "launch": "index.android.bundle",
+        "files": entries,
+    })
+    .to_string();
+    use ed25519_dalek::Signer;
+    let signature =
+        base64::engine::general_purpose::STANDARD.encode(key.sign(manifest.as_bytes()).to_bytes());
+    let runtime_dir = layout
+        .root
+        .join(&updates.directory)
+        .join("android")
+        .join(&runtime);
+    let dest = runtime_dir.join(&id);
+    std::fs::create_dir_all(&runtime_dir).map_err(|e| format!("{}: {e}", runtime_dir.display()))?;
+    std::fs::rename(&files_dir, dest.join("files"))
+        .or_else(|_| {
+            std::fs::create_dir_all(&dest)?;
+            std::fs::rename(&files_dir, dest.join("files"))
+        })
+        .map_err(|e| format!("{}: {e}", dest.display()))?;
+    write(&dest.join("manifest.json"), manifest.as_bytes())?;
+    write(
+        &dest.join("manifest.sig"),
+        format!("{signature}\n").as_bytes(),
+    )?;
+    // Last: the server starts answering it only once everything is there.
+    let latest_tmp = runtime_dir.join("latest.tmp");
+    write(&latest_tmp, format!("{id}\n").as_bytes())?;
+    std::fs::rename(&latest_tmp, runtime_dir.join("latest")).map_err(|e| format!("latest: {e}"))?;
+    crate::ui::success(&format!(
+        "Published update {id} for runtime {runtime} ({} files) into {}",
+        files_under(&dest.join("files"))?.len(),
+        dest.display()
+    ));
+    crate::ui::info(
+        "Deploy that directory with the app: phones of this runtime take it at their next start.",
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1242,6 +1654,7 @@ mod tests {
                 name: "NativeOrbit".into(),
                 header: "NativeOrbit.h".into(),
             }],
+            ..NativePackage::default()
         }];
         let config = MobileConfig {
             name: "Tessel & co".into(),
@@ -1256,6 +1669,7 @@ mod tests {
                 keystore: "release.keystore".into(),
                 alias: "release".into(),
             }),
+            updates: None,
         };
         let layout = Layout {
             root: root.clone(),
@@ -1327,6 +1741,218 @@ mod tests {
         )
         .contains("Install via USB"));
         assert!(install_failure("INSTALL_FAILED_UPDATE_INCOMPATIBLE").contains("adb uninstall"));
+    }
+
+    /// The public key of a fixed seed.
+    fn public_key() -> String {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes())
+    }
+
+    #[test]
+    fn reads_the_update_server_and_refuses_an_unsafe_one() {
+        let root = project("updates");
+        let parse = |updates: Value| {
+            parse_config(
+                &json!({ "mobile": { "name": "A", "id": "ch.c9up.a", "entry": "mobile/index.ts", "updates": updates } }),
+                &root,
+            )
+        };
+        let config = parse(
+            json!({ "url": "https://api.example.com/__robledo/", "publicKey": public_key() }),
+        )
+        .unwrap();
+        let updates = config.updates.unwrap();
+        assert_eq!(updates.url, "https://api.example.com/__robledo");
+        assert_eq!(updates.directory, PathBuf::from("robledo"));
+        assert!(parse(
+            json!({ "url": "http://localhost:3333/__robledo", "publicKey": public_key() })
+        )
+        .is_ok());
+        assert!(parse(
+            json!({ "url": "http://10.0.2.2:3333/__robledo", "publicKey": public_key() })
+        )
+        .is_ok());
+        assert!(parse(
+            json!({ "url": "http://api.example.com/__robledo", "publicKey": public_key() })
+        )
+        .unwrap_err()
+        .contains("https"));
+        assert!(
+            parse(json!({ "url": "http://localhost.evil.com/x", "publicKey": public_key() }))
+                .is_err()
+        );
+        assert!(parse(json!({ "url": "https://x", "publicKey": "AAAA" }))
+            .unwrap_err()
+            .contains("Ed25519"));
+    }
+
+    #[test]
+    fn the_runtime_version_follows_react_native_and_the_native_packages() {
+        let root = temp("runtime");
+        let layout = Layout {
+            root: root.clone(),
+            ream: root.join(".ream"),
+            android: root.join(".ream/android"),
+            rust: root.join(".ream/rust"),
+            node_modules: root.join("node_modules"),
+        };
+        install(&root, "react-native", json!({ "version": "0.87.1" }));
+        let native = |name: &str, version: &str| NativePackage {
+            name: name.into(),
+            version: version.into(),
+            ..NativePackage::default()
+        };
+        let a = runtime_version(
+            &layout,
+            &[
+                native("@c9up/orbit", "0.1.0"),
+                native("@c9up/robledo", "0.1.0"),
+            ],
+        );
+        assert_eq!(a.len(), 16);
+        // The order natives are found in does not matter.
+        assert_eq!(
+            a,
+            runtime_version(
+                &layout,
+                &[
+                    native("@c9up/robledo", "0.1.0"),
+                    native("@c9up/orbit", "0.1.0")
+                ]
+            )
+        );
+        assert_ne!(
+            a,
+            runtime_version(
+                &layout,
+                &[
+                    native("@c9up/orbit", "0.1.1"),
+                    native("@c9up/robledo", "0.1.0")
+                ]
+            )
+        );
+        install(&root, "react-native", json!({ "version": "0.88.0" }));
+        assert_ne!(
+            a,
+            runtime_version(
+                &layout,
+                &[
+                    native("@c9up/orbit", "0.1.0"),
+                    native("@c9up/robledo", "0.1.0")
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn wires_the_package_that_picks_the_bundle_and_writes_the_update_config() {
+        let root = project("provider");
+        install(&root, "react-native", json!({ "version": "0.87.1" }));
+        let layout = Layout {
+            root: root.clone(),
+            ream: root.join(".ream"),
+            android: root.join(".ream/android"),
+            rust: root.join(".ream/rust"),
+            node_modules: root.join("node_modules"),
+        };
+        let orbit = NativePackage {
+            name: "@c9up/orbit".into(),
+            ..NativePackage::default()
+        };
+        let robledo = NativePackage {
+            name: "@c9up/robledo".into(),
+            version: "0.1.0".into(),
+            bundle_provider: Some("com.c9up.robledo.Robledo.bundleFile".into()),
+            ..NativePackage::default()
+        };
+        let mut config = parse_config(
+            &json!({ "mobile": { "name": "A", "id": "ch.c9up.a", "entry": "mobile/index.ts",
+                                 "updates": { "url": "https://x.example/__robledo", "publicKey": public_key() } } }),
+            &root,
+        )
+        .unwrap();
+        let natives = vec![orbit, robledo];
+        generate(&layout, &config, &natives, "27").unwrap();
+        let app = std::fs::read_to_string(
+            layout
+                .android
+                .join("app/src/main/java/ch/c9up/a/MainApplication.kt"),
+        )
+        .unwrap();
+        assert!(app.contains(
+            "jsBundleFilePath = com.c9up.robledo.Robledo.bundleFile(applicationContext).takeUnless { BuildConfig.DEBUG }"
+        ));
+        let written: Value = serde_json::from_str(
+            &std::fs::read_to_string(layout.android.join("app/src/main/assets/ream-updates.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written["url"], "https://x.example/__robledo");
+        assert_eq!(
+            written["runtimeVersion"],
+            runtime_version(&layout, &natives)
+        );
+        // https: no cleartext allowance.
+        assert!(!layout
+            .android
+            .join("app/src/main/res/xml/ream_network_security.xml")
+            .exists());
+        // Updates turned off: the config goes, the app's own bundle runs.
+        config.updates = None;
+        generate(&layout, &config, &natives, "27").unwrap();
+        assert!(!layout
+            .android
+            .join("app/src/main/assets/ream-updates.json")
+            .exists());
+        // Two packages picking the bundle: refused.
+        let twice = vec![
+            NativePackage {
+                name: "@c9up/orbit".into(),
+                ..NativePackage::default()
+            },
+            NativePackage {
+                name: "a".into(),
+                bundle_provider: Some("a.B.c".into()),
+                ..NativePackage::default()
+            },
+            NativePackage {
+                name: "b".into(),
+                bundle_provider: Some("b.C.d".into()),
+                ..NativePackage::default()
+            },
+        ];
+        assert!(generate(&layout, &config, &twice, "27")
+            .unwrap_err()
+            .contains("keep one"));
+    }
+
+    #[test]
+    fn generates_an_update_key_readable_by_its_owner_only() {
+        let dir = temp("keygen");
+        let path = dir.join("robledo.key");
+        let path_text = path.to_string_lossy().to_string();
+        run_generate_update_key(Some(&path_text), false).unwrap();
+        let seed = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(seed.trim())
+                .unwrap()
+                .len(),
+            32
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert!(run_generate_update_key(Some(&path_text), false)
+            .unwrap_err()
+            .contains("--force"));
+        assert!(signing_key(&path).is_ok());
     }
 
     #[test]
