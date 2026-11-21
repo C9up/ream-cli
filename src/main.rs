@@ -6,6 +6,7 @@
 mod add;
 mod codemods;
 mod commands;
+mod css;
 mod dev;
 mod doctor;
 mod envfile;
@@ -285,6 +286,16 @@ enum Commands {
         /// Replace an existing key (installed apps then refuse updates until rebuilt)
         #[arg(long, default_value_t = false)]
         force: bool,
+    },
+
+    /// Compile a Tailwind stylesheet into the style table orbit reads on a phone
+    #[command(name = "css:compile")]
+    CssCompile {
+        /// The compiled CSS (Tailwind's output)
+        input: String,
+        /// Where to write the JSON table (stdout otherwise)
+        #[arg(long, short)]
+        out: Option<String>,
     },
 
     /// Open an interactive shell with the application booted
@@ -618,6 +629,7 @@ fn main() {
         Commands::AndroidRun { release, device } => mobile::run_on_device(release, device.as_deref()),
         Commands::AndroidPublish { key } => mobile::run_publish(key.as_deref()),
         Commands::GenerateUpdateKey { out, force } => mobile::run_generate_update_key(out.as_deref(), force),
+        Commands::CssCompile { input, out } => css::run_compile(&input, out.as_deref()),
         Commands::Repl => commands::run_repl(),
         Commands::Info => commands::info(),
         Commands::List { namespaces, json } => {

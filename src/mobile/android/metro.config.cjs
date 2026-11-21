@@ -5,7 +5,17 @@ const { getDefaultConfig, mergeConfig } = require("@react-native/metro-config");
 
 const projectRoot = path.resolve(__dirname, "..");
 
+// The app's style table (`ream css:compile` over its Tailwind build), which
+// @c9up/orbit's app entry imports as `@c9up/orbit-styles`.
+const styles = path.join(__dirname, "orbit-styles.json");
+
 module.exports = mergeConfig(getDefaultConfig(projectRoot), {
   projectRoot,
   watchFolders: [projectRoot],
+  resolver: {
+    resolveRequest(context, moduleName, platform) {
+      if (moduleName === "@c9up/orbit-styles") return { type: "sourceFile", filePath: styles };
+      return context.resolveRequest(context, moduleName, platform);
+    },
+  },
 });
