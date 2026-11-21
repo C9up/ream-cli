@@ -50,6 +50,10 @@ ream generate:key                     # a fresh APP_KEY into .env
 ream inspect                          # routes, providers, container bindings
 ream list                             # every command — this binary's and the app's
 
+# Mobile (reamrc.ts `mobile` block)
+ream android:run                      # build, install and start on a device; Metro reloads the JS
+ream android:build --release          # a signed APK (--aab for the Play Store)
+
 # Diagnostics
 ream doctor                           # environment health checks
 ream info                             # version info

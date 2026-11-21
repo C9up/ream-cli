@@ -10,6 +10,7 @@ mod dev;
 mod doctor;
 mod envfile;
 mod mcp;
+mod mobile;
 mod scaffold;
 mod template;
 mod tools;
@@ -241,6 +242,29 @@ enum Commands {
         /// Print a key instead of writing it to .env
         #[arg(long, default_value_t = false)]
         show: bool,
+    },
+
+    /// Build the app's Android APK (or AAB) from reamrc.ts's `mobile` config
+    #[command(name = "android:build")]
+    AndroidBuild {
+        /// A release build, signed with the app's keystore (a debug build otherwise)
+        #[arg(long, default_value_t = false)]
+        release: bool,
+        /// An Android App Bundle for the Play Store instead of an APK (release)
+        #[arg(long, default_value_t = false)]
+        aab: bool,
+    },
+
+    /// Build, install and start the app on an Android device; a debug build
+    /// loads its JS from Metro, which this then serves
+    #[command(name = "android:run")]
+    AndroidRun {
+        /// A release build, signed with the app's keystore, without Metro
+        #[arg(long, default_value_t = false)]
+        release: bool,
+        /// The device's serial (adb devices); needed when several are attached
+        #[arg(long)]
+        device: Option<String>,
     },
 
     /// Open an interactive shell with the application booted
@@ -570,6 +594,8 @@ fn main() {
         Commands::Inspect => commands::run_inspect(),
 
         Commands::GenerateKey { force, show } => commands::run_generate_key(force, show),
+        Commands::AndroidBuild { release, aab } => mobile::run_build(release || aab, aab),
+        Commands::AndroidRun { release, device } => mobile::run_on_device(release, device.as_deref()),
         Commands::Repl => commands::run_repl(),
         Commands::Info => commands::info(),
         Commands::List { namespaces, json } => {
