@@ -257,13 +257,26 @@ jobs:
       - run: cargo install cargo-audit --locked --version 0.22.2
       - run: cargo audit --deny warnings
 
+  npm-audit:
+    name: Advisories (npm, production tree)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24'
+      # What a user installs (dependencies and peers, resolved fresh, no
+      # devDependencies) must carry no high or critical advisory and none it
+      # cannot be updated out of. Exceptions: .github/npm-audit-exceptions.json.
+      - run: node .github/scripts/npm-audit.mjs
+
   publish:
     # Every job that verifies something, not only the ones on the build path:
     # `check` carries the end-to-end `ream new` and `check-windows` the only
     # verification of the win32-x64 package that goes out with the others.
     # Leaving one out ran it side by side with the publish, which shipped
     # whatever it found.
-    needs: [build, gates, check, check-windows, audit]
+    needs: [build, gates, check, check-windows, audit, npm-audit]
     if: github.event_name == 'workflow_dispatch'
     # A publish is a deployment to npm. The environment's protection rules
     # (required reviewer, deployments from v* tags only) are what stands
