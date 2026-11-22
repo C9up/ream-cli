@@ -1721,6 +1721,36 @@ pub fn run_publish(key_file: Option<&str>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    /// What `ream generate:update-key` and `android:publish` write and sign
+    /// with, fixed: a crypto crate upgrade that changed any of it would make
+    /// every installed app refuse the next update. Values from ed25519-dalek 2,
+    /// sha2 0.10 and base64 0.22; the same vectors are in robledo-client.
+    #[test]
+    fn keeps_the_update_keys_signatures_and_digests_of_earlier_releases() {
+        use base64::Engine;
+        use ed25519_dalek::Signer;
+        let message = b"robledo update manifest vector";
+        let seed = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+        let decoded: [u8; 32] = base64::engine::general_purpose::STANDARD
+            .decode(&seed)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .expect("a 32-byte seed");
+        let key = ed25519_dalek::SigningKey::from_bytes(&decoded);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes()),
+            "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw="
+        );
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.encode(key.sign(message).to_bytes()),
+            "bkEEfchf5aF/atZ+tO0U5Tb254nZNLunaeSIx5YjjzJ3iLVS7RNsDPHUsBb9acM/nIFn3H81Uc12xZl2V3MzDg=="
+        );
+        assert_eq!(
+            hex(&Sha256::digest(message)),
+            "bb558155f17e9a932b286dd54c5d5e143ff8ab009824b1a2dfdb019895e4c961"
+        );
+    }
+
     use super::*;
     use serde_json::json;
 
