@@ -258,12 +258,13 @@ fn check_package_json() -> Check {
     }
 }
 
-/// Does `ream dev` hot-reload, or restart the whole process on every save?
+/// Does `ream dev` swap a changed module, or reload the server on every save?
 ///
-/// `dev` picks the mode by looking for `hot-hook`, the way upstream's assembler
-/// does. A project created before that existed simply has neither the
-/// dependency nor the `hotHook` block, restarts on every change, and is told
-/// nothing — the cost is invisible because a restart LOOKS like it is working.
+/// `dev` always loads `@c9up/ream/hot`; what decides is whether package.json
+/// declares `hotHook.boundaries`. Without them every change walks up to a
+/// module nobody re-imports and becomes a full reload, which LOOKS like it is
+/// working, so nothing would say so.
+///
 /// The boundaries glob that matches THIS project's layout.
 ///
 /// Suggesting the wrong one is worse than suggesting nothing: boundaries that

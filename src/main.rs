@@ -184,7 +184,7 @@ enum Commands {
         package_manager: Option<String>,
     },
 
-    /// Start development server — hot-reloads through hot-hook when the project has it, otherwise node --watch
+    /// Start development server — swaps a changed module in place behind the hotHook boundaries of package.json, reloads the server otherwise
     Dev {
         /// Keep the previous logs on screen after a change
         #[arg(long = "no-clear", action = clap::ArgAction::SetTrue)]
