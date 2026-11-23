@@ -564,12 +564,12 @@ fn package_json(name: &str, template: &str) -> String {
     // The key is `hotHook`, as upstream names it: an application moving over
     // from AdonisJS keeps the block it already has.
     let boundaries = if boots_its_app(template) {
-        "\n  \"hotHook\": {\n    \"boundaries\": [\n      \"./app/controllers/**/*.ts\",\n      \"./app/middleware/*.ts\"\n    ]\n  },"
+        "\n  \"hotHook\": {\n    \"boundaries\": [\n      \"./app/controllers/**/*.ts\",\n      \"./app/middleware/*.ts\",\n      \"./app/modules/*/controllers/*.ts\",\n      \"./app/modules/*/middleware/*.ts\"\n    ]\n  },"
     } else {
         ""
     };
 
-    let imports = "    \"#app/WILDCARD\": \"./app/WILDCARD\",\n    \"#middleware/WILDCARD\": \"./app/middleware/WILDCARD\",\n    \"#config/WILDCARD\": \"./config/WILDCARD\",\n    \"#providers/WILDCARD\": \"./providers/WILDCARD\",\n    \"#start/WILDCARD\": \"./start/WILDCARD\"".replace("WILDCARD", "*");
+    let imports = "    \"#app/WILDCARD\": \"./app/WILDCARD\",\n    \"#modules/WILDCARD\": \"./app/modules/WILDCARD\",\n    \"#middleware/WILDCARD\": \"./app/middleware/WILDCARD\",\n    \"#exceptions/WILDCARD\": \"./app/exceptions/WILDCARD\",\n    \"#config/WILDCARD\": \"./config/WILDCARD\",\n    \"#providers/WILDCARD\": \"./providers/WILDCARD\",\n    \"#start/WILDCARD\": \"./start/WILDCARD\"".replace("WILDCARD", "*");
 
     format!("{{\n  \"name\": \"{}\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"type\": \"module\",{}\n  \"imports\": {{\n{}\n  }},\n  \"scripts\": {{\n    \"dev\": \"ream dev\",\n    \"build\": \"ream build\",\n    \"start\": \"ream start\",\n    \"test\": \"{}\"\n  }},\n  \"dependencies\": {{\n    {}\n  }},\n  \"devDependencies\": {{\n    {}\n  }},\n  \"engines\": {{\n    \"node\": \">=24.0.0\"\n  }}\n}}", name, boundaries, imports, test_script, deps.join(",\n    "), dev_deps.join(",\n    "))
 }
@@ -586,7 +586,7 @@ fn tsconfig() -> String {
     // Extend the framework-shipped base — apps only declare `paths` + their
     // own `include`. Strict / target / decorators / etc. all come from the
     // base so a Ream bump can adjust them across the ecosystem at once.
-    let paths = "      \"#app/WILDCARD\": [\"./app/WILDCARD\"],\n      \"#middleware/WILDCARD\": [\"./app/middleware/WILDCARD\"],\n      \"#config/WILDCARD\": [\"./config/WILDCARD\"],\n      \"#providers/WILDCARD\": [\"./providers/WILDCARD\"],\n      \"#start/WILDCARD\": [\"./start/WILDCARD\"]".replace("WILDCARD", "*");
+    let paths = "      \"#app/WILDCARD\": [\"./app/WILDCARD\"],\n      \"#modules/WILDCARD\": [\"./app/modules/WILDCARD\"],\n      \"#middleware/WILDCARD\": [\"./app/middleware/WILDCARD\"],\n      \"#exceptions/WILDCARD\": [\"./app/exceptions/WILDCARD\"],\n      \"#config/WILDCARD\": [\"./config/WILDCARD\"],\n      \"#providers/WILDCARD\": [\"./providers/WILDCARD\"],\n      \"#start/WILDCARD\": [\"./start/WILDCARD\"]".replace("WILDCARD", "*");
     format!("{{\n  \"extends\": \"@c9up/ream/tsconfig.app.json\",\n  \"compilerOptions\": {{\n    \"rootDir\": \"./\",\n    \"paths\": {{\n{}\n    }}\n  }},\n  \"include\": [\"app\", \"bin\", \"config\", \"providers\", \"start\", \"tests\", \"reamrc.ts\"]\n}}", paths)
 }
 
@@ -1345,6 +1345,47 @@ mod tests {
             "a fresh project must have something for `ream test` to run"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Every alias the docs use resolves in a fresh app, for Node.js and for
+    /// TypeScript alike: `#exceptions/handler.js` was documented and missing.
+    #[test]
+    fn a_scaffolded_app_declares_every_documented_alias() {
+        let manifest = package_json("demo", "api");
+        let config = tsconfig();
+        for (alias, target) in [
+            ("#app/*", "./app/*"),
+            ("#modules/*", "./app/modules/*"),
+            ("#middleware/*", "./app/middleware/*"),
+            ("#exceptions/*", "./app/exceptions/*"),
+            ("#config/*", "./config/*"),
+            ("#providers/*", "./providers/*"),
+            ("#start/*", "./start/*"),
+        ] {
+            assert!(
+                manifest.contains(&format!("\"{alias}\": \"{target}\"")),
+                "package.json lacks {alias}: {manifest}"
+            );
+            assert!(
+                config.contains(&format!("\"{alias}\": [\"{target}\"]")),
+                "tsconfig.json lacks {alias}: {config}"
+            );
+        }
+    }
+
+    /// The modular layout the docs describe reloads its controllers in place,
+    /// as `ream doctor` already suggests for it.
+    #[test]
+    fn hot_reload_covers_the_module_layout() {
+        let manifest = package_json("demo", "api");
+        assert!(
+            manifest.contains("\"./app/modules/*/controllers/*.ts\""),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains("\"./app/modules/*/middleware/*.ts\""),
+            "{manifest}"
+        );
     }
 
     #[test]
