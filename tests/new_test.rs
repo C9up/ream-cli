@@ -362,9 +362,14 @@ fn a_new_project_installs_and_passes_its_own_tests() {
             String::from_utf8_lossy(&created.stderr)
         );
 
+        // Probes of what the generated kernel does, run by the project's own
+        // suite against the packages it installed.
+        let project = dir.path.join("demo");
+        let expected = probe_the_kernel(&project, template);
+
         let tested = cli()
             .arg("test")
-            .current_dir(dir.path.join("demo"))
+            .current_dir(&project)
             .output()
             .expect("spawn ream test");
         let stdout = String::from_utf8_lossy(&tested.stdout);
@@ -375,8 +380,90 @@ fn a_new_project_installs_and_passes_its_own_tests() {
         );
         let report = format!("{stdout}{stderr}");
         assert!(
-            report.contains("1 passed") && report.contains("0 failed"),
-            "{template}: the root route test must run and pass — got:\n{report}"
+            report.contains(&format!("{expected} passed")) && report.contains("0 failed"),
+            "{template}: the root route test and the kernel probes must run and pass — got:\n{report}"
         );
     }
+}
+
+/// Adds tests to a generated project that check its kernel, and returns how
+/// many tests the suite then holds.
+///
+/// Both templates: a response to a path no route matches carries the
+/// protective headers, which only the server half of blackhole can add.
+/// `web`: a route chained with `.guard('session')` refuses an anonymous
+/// request and answers a signed-in one, which needs the global middleware to
+/// record the guard that vouched for the user.
+fn probe_the_kernel(project: &Path, template: &str) -> usize {
+    let frame = if template == "api" {
+        "DENY"
+    } else {
+        "SAMEORIGIN"
+    };
+    let mut probes = format!(
+        r#"import {{ test }} from '@c9up/helix'
+
+test('a path no route matches still carries the protective headers', async ({{ client }}) => {{
+  await client
+    .get('/no-route-here')
+    .assertStatus(404)
+    .assertHeader('x-content-type-options', 'nosniff')
+    .assertHeader('x-frame-options', '{frame}')
+}})
+"#
+    );
+    let mut count = 2;
+    if template == "api" {
+        probes.push_str(
+            r#"
+test('a JSON answer carries HSTS and no content security policy', async ({ client }) => {
+  const res = await client.get('/').assertOk().assertHeader('strict-transport-security')
+  if (res.header('content-security-policy') !== undefined) {
+    throw new Error('an API serves no HTML to guard with a CSP')
+  }
+})
+
+test('a cross-origin request is granted nothing until an origin is listed', async ({ client }) => {
+  const res = await client.get('/').header('origin', 'https://elsewhere.example').assertOk()
+  if (res.header('access-control-allow-origin') !== undefined) {
+    throw new Error('an unlisted origin was granted')
+  }
+})
+"#,
+        );
+        count += 2;
+    }
+    if template == "web" {
+        std::fs::write(
+            project.join("config/auth.ts"),
+            "export default {\n  defaultStrategy: 'session',\n  session: {\n    async findUser(id: string | number) {\n      return String(id) === '1' ? { id: '1' } : null\n    },\n  },\n}\n",
+        )
+        .expect("write config/auth.ts");
+        let routes = project.join("start/routes.ts");
+        let mut source = read(&routes);
+        source.push_str(
+            "\nrouter.get('/probe/sign-in', async (ctx) => {\n  ctx.session?.put('auth_user_id', '1')\n  ctx.response.json({ signedIn: true })\n})\n\nrouter.get('/probe/private', async ({ response }) => {\n  response.json({ private: true })\n}).guard('session')\n",
+        );
+        std::fs::write(&routes, source).expect("write start/routes.ts");
+        probes.push_str(
+            r#"
+test('a guarded route refuses an anonymous request', async ({ client }) => {
+  await client.get('/probe/private').assertStatus(401)
+})
+
+test('a guarded route answers a signed-in user', async ({ client }) => {
+  const signIn = await client.get('/probe/sign-in').assertOk()
+  const cookie = (signIn.header('set-cookie') ?? '')
+    .split('\n')
+    .map((line) => line.split(';')[0])
+    .join('; ')
+  await client.get('/probe/private').header('cookie', cookie).assertOk()
+})
+"#,
+        );
+        count += 2;
+    }
+    std::fs::write(project.join("tests/functional/kernel.test.ts"), probes)
+        .expect("write the kernel probes");
+    count
 }

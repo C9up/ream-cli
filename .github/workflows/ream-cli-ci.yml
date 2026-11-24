@@ -256,6 +256,15 @@ jobs:
       # Pinned and --locked: the auditor is itself a dependency of the release.
       - run: cargo install cargo-audit --locked --version 0.22.2
       - run: cargo audit --deny warnings
+      # THIRD-PARTY-NOTICES.md, the notices shipped beside the binary, follows
+      # Cargo.lock: regenerated here, it fails the job when it differs from the
+      # committed file, and so does a crate under a licence about.toml does not
+      # accept. The generator is pinned and --locked like the auditor.
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24'
+      - run: cargo install cargo-about --locked --version 0.9.3 --features cli
+      - run: node scripts/third-party-notices.mjs --check
 
   npm-audit:
     name: Advisories (npm, production tree)
@@ -356,6 +365,9 @@ jobs:
 
             cp README.md "npm/${PKG}/README.md"
             cp LICENSE "npm/${PKG}/LICENSE"
+            # The notices of the crates the binary links, which MIT, BSD and ISC
+            # require beside every copy.
+            cp THIRD-PARTY-NOTICES.md "npm/${PKG}/"
           done
 
       # The wrapper, pinning the five platform packages at the exact version.
@@ -425,6 +437,7 @@ jobs:
           chmod +x npm/ream-cli/bin/ream
           cp README.md npm/ream-cli/README.md
           cp LICENSE npm/ream-cli/LICENSE
+          cp THIRD-PARTY-NOTICES.md npm/ream-cli/
 
       # npm has no multi-package transaction and a published version cannot be
       # taken back, so whatever can be refused is made to be refused before the

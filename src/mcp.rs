@@ -13,11 +13,22 @@ const CONFIG: &str = ".mcp.json";
 const SERVER_KEY: &str = "ream";
 const PACKAGE: &str = "@c9up/ream-mcp";
 
+/// The config, or an empty object when the project has none.
+///
+/// `.mcp.json` comes with the repository, so it is read and written the way
+/// `generate:key` treats `.env`: a symbolic link (or anything but a regular
+/// file) is refused by name, and the file is opened without following one. A
+/// committed link would otherwise have `install` rewrite whatever JSON file of
+/// the developer's account it points to.
 fn load() -> Result<Value, String> {
-    if !Path::new(CONFIG).exists() {
+    load_from(Path::new(CONFIG))
+}
+
+fn load_from(path: &Path) -> Result<Value, String> {
+    if !crate::commands::regular_file_or_absent(path)? {
         return Ok(json!({}));
     }
-    let raw = fs::read_to_string(CONFIG).map_err(|e| format!("Failed to read {CONFIG}: {e}"))?;
+    let raw = crate::commands::read_regular_file(path)?;
     if raw.trim().is_empty() {
         return Ok(json!({}));
     }
@@ -25,9 +36,14 @@ fn load() -> Result<Value, String> {
 }
 
 fn save(v: &Value) -> Result<(), String> {
+    save_to(Path::new(CONFIG), v)
+}
+
+fn save_to(path: &Path, v: &Value) -> Result<(), String> {
+    crate::commands::regular_file_or_absent(path)?;
     let mut s = serde_json::to_string_pretty(v).map_err(|e| e.to_string())?;
     s.push('\n');
-    fs::write(CONFIG, s).map_err(|e| format!("Failed to write {CONFIG}: {e}"))
+    crate::commands::write_regular_file(path, s.as_bytes(), 0o666)
 }
 
 /// The server entry, identical on every machine: `.mcp.json` is committed.
@@ -103,7 +119,7 @@ pub fn install() -> Result<(), String> {
 }
 
 pub fn uninstall() -> Result<(), String> {
-    if !Path::new(CONFIG).exists() {
+    if !crate::commands::regular_file_or_absent(Path::new(CONFIG))? {
         println!();
         crate::ui::info(&format!("{CONFIG} not found — nothing to remove"));
         println!();
@@ -207,6 +223,64 @@ mod tests {
         assert_eq!(root["unrelated"], json!(true));
         let keys: Vec<&String> = root["mcpServers"].as_object().unwrap().keys().collect();
         assert_eq!(keys, ["other", "ream"]);
+    }
+
+    fn scratch(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ream-mcp-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A committed `.mcp.json` link to another JSON file of the developer is
+    /// refused on read and on write, and the file it points to is untouched;
+    /// a dangling link is not created through either.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_config_is_refused_and_its_target_left_alone() {
+        let dir = scratch("link");
+        let target = dir.join("client.json");
+        let original = r#"{"mcpServers":{"other":{"command":"x"}},"theme":"dark"}"#;
+        fs::write(&target, original).unwrap();
+        let config = dir.join(".mcp.json");
+        std::os::unix::fs::symlink(&target, &config).unwrap();
+
+        let refused = load_from(&config).unwrap_err();
+        assert!(refused.contains("symbolic link"), "{refused}");
+        let mut root = json!({});
+        register(&mut root).unwrap();
+        assert!(save_to(&config, &root)
+            .unwrap_err()
+            .contains("symbolic link"));
+        assert_eq!(fs::read_to_string(&target).unwrap(), original);
+
+        let dangling = dir.join("dangling.mcp.json");
+        std::os::unix::fs::symlink(dir.join("absent.json"), &dangling).unwrap();
+        assert!(save_to(&dangling, &root).is_err());
+        assert!(!dir.join("absent.json").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A regular file is still merged in place, other servers kept.
+    #[test]
+    fn a_regular_config_round_trips() {
+        let dir = scratch("regular");
+        let config = dir.join(".mcp.json");
+        fs::write(&config, r#"{"mcpServers":{"other":{"command":"x"}}}"#).unwrap();
+        let mut root = load_from(&config).unwrap();
+        register(&mut root).unwrap();
+        save_to(&config, &root).unwrap();
+        let saved = load_from(&config).unwrap();
+        assert_eq!(saved["mcpServers"]["other"], json!({ "command": "x" }));
+        assert_eq!(saved["mcpServers"]["ream"], server_entry());
+        assert_eq!(load_from(&dir.join("none.json")).unwrap(), json!({}));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

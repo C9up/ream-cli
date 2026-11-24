@@ -22,9 +22,9 @@ class MainActivity : ReactActivity() {
     )
   }
 
+  // No launch props: the activity is exported (it is the launcher), so any app
+  // on the phone can start it with extras of its choosing. They are not passed
+  // to the root component, as React Native's own delegate does not pass them.
   override fun createReactActivityDelegate(): ReactActivityDelegate =
-    object : DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled) {
-      // Intent extras reach the app as its launch props.
-      override fun getLaunchOptions(): Bundle? = plainActivity.intent.extras
-    }
+    DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled)
 }

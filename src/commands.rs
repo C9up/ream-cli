@@ -897,10 +897,12 @@ pub fn run_repl() -> Result<(), String> {
         return Err("reamrc.ts not found — `ream repl` boots the app from the rc file".to_string());
     }
 
+    // `@c9up/ream` first: it loads `reflect-metadata` itself, before any
+    // decorated class of the app is defined. The project does not have to
+    // declare that package for this script to resolve it.
     let script = r#"
-        import 'reflect-metadata';
-        import repl from 'node:repl';
         import { Ignitor, prettyPrintError } from '@c9up/ream';
+        import repl from 'node:repl';
 
         const rc = (await import('./reamrc.ts')).default;
         const ignitor = await new Ignitor(new URL('./', import.meta.url))
@@ -954,8 +956,9 @@ pub fn run_repl() -> Result<(), String> {
 ///
 /// NAMED DEVIATION (better than upstream) — AdonisJS's env editor reads and
 /// writes through a link. `generate:key` is run right after cloning a
-/// repository, which decides what `.env` and `.env.example` are.
-fn regular_file_or_absent(path: &std::path::Path) -> Result<bool, String> {
+/// repository, which decides what `.env` and `.env.example` are; so are
+/// `generate:update-key` and `mcp install`, which share these checks.
+pub(crate) fn regular_file_or_absent(path: &std::path::Path) -> Result<bool, String> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => Err(format!(
             "Refusing to write {} through a symbolic link — replace it with a regular file.",
@@ -992,7 +995,7 @@ fn ensure_regular(file: std::fs::File, path: &std::path::Path) -> Result<std::fs
     }
 }
 
-fn read_env_file(path: &std::path::Path) -> Result<String, String> {
+pub(crate) fn read_regular_file(path: &std::path::Path) -> Result<String, String> {
     use std::io::Read;
     let file = no_follow(std::fs::OpenOptions::new().read(true))
         .open(path)
@@ -1004,10 +1007,9 @@ fn read_env_file(path: &std::path::Path) -> Result<String, String> {
     Ok(text)
 }
 
-/// Write `content` to `path`, created with `mode` (before the umask) when it
-/// does not exist; an existing file keeps the mode its owner gave it.
-fn write_env_file(path: &std::path::Path, content: &str, mode: u32) -> Result<(), String> {
-    use std::io::Write;
+/// `path` opened for writing without following a link, created with `mode`
+/// (before the umask) when it does not exist, and known to be a regular file.
+fn open_regular_for_write(path: &std::path::Path, mode: u32) -> Result<std::fs::File, String> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true);
     #[cfg(unix)]
@@ -1020,11 +1022,42 @@ fn write_env_file(path: &std::path::Path, content: &str, mode: u32) -> Result<()
     let file = no_follow(&mut options)
         .open(path)
         .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
-    // Truncated only once it is known to be a regular file.
-    let mut file = ensure_regular(file, path)?;
+    ensure_regular(file, path)
+}
+
+/// Replace the content of `file`, opened on `path`.
+fn rewrite(mut file: std::fs::File, path: &std::path::Path, content: &[u8]) -> Result<(), String> {
+    use std::io::Write;
     file.set_len(0)
-        .and_then(|()| file.write_all(content.as_bytes()))
+        .and_then(|()| file.write_all(content))
         .map_err(|e| format!("Failed to write {}: {}", path.display(), e))
+}
+
+/// Write `content` to `path`, created with `mode` (before the umask) when it
+/// does not exist; an existing file keeps the mode its owner gave it.
+pub(crate) fn write_regular_file(
+    path: &std::path::Path,
+    content: &[u8],
+    mode: u32,
+) -> Result<(), String> {
+    // Truncated only once it is known to be a regular file.
+    let file = open_regular_for_write(path, mode)?;
+    rewrite(file, path, content)
+}
+
+/// Write a secret to `path`, readable by its owner only whether the file is
+/// new or not: an existing file's mode is set to 0600 BEFORE the secret is
+/// written into it, so the secret is never readable by others, even for a
+/// moment.
+pub(crate) fn write_owner_only_file(path: &std::path::Path, content: &[u8]) -> Result<(), String> {
+    let file = open_regular_for_write(path, 0o600)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Failed to restrict {}: {}", path.display(), e))?;
+    }
+    rewrite(file, path, content)
 }
 
 /// Whether this machine says it is production, under any of the spellings
@@ -1087,7 +1120,7 @@ pub fn run_generate_key(force: bool, show: bool) -> Result<(), String> {
     let env_present = regular_file_or_absent(env_path)?;
     let example_present = regular_file_or_absent(example_path)?;
     let existing = if env_present {
-        read_env_file(env_path)?
+        read_regular_file(env_path)?
     } else {
         String::new()
     };
@@ -1107,16 +1140,16 @@ pub fn run_generate_key(force: bool, show: bool) -> Result<(), String> {
 
     let key = generate_app_key()?;
     let updated = crate::envfile::upsert_env_var(&existing, "APP_KEY", &key);
-    write_env_file(env_path, &updated, 0o600)?;
+    write_regular_file(env_path, updated.as_bytes(), 0o600)?;
 
     // The committed example records the variable with an empty value, and
     // only where the project keeps one — the way upstream's env editor writes
     // `APP_KEY=` there. The key itself never leaves `.env`.
     if example_present {
-        let example = read_env_file(example_path)?;
+        let example = read_regular_file(example_path)?;
         let updated = crate::envfile::upsert_env_var(&example, "APP_KEY", "");
         if updated != example {
-            write_env_file(example_path, &updated, 0o666)?;
+            write_regular_file(example_path, updated.as_bytes(), 0o666)?;
         }
     }
 
@@ -1431,7 +1464,6 @@ fn console_node_args(entry: &ConsoleEntry, argv: &[String]) -> Vec<String> {
 fn console_script(argv: &[String]) -> String {
     format!(
         r#"
-        import 'reflect-metadata';
         import {{ Ignitor, prettyPrintError }} from '@c9up/ream';
         const rc = (await import('./reamrc.ts')).default;
         try {{
@@ -1723,7 +1755,6 @@ pub fn run_inspect() -> Result<(), String> {
     }
 
     let script = r#"
-        import 'reflect-metadata';
         import { Ignitor } from '@c9up/ream';
         const rc = (await import('./reamrc.ts')).default;
         const app = await new Ignitor(new URL('./', import.meta.url))
@@ -1737,8 +1768,15 @@ pub fn run_inspect() -> Result<(), String> {
         } else {
             for (const r of routes) {
                 const name = r.name ? `  [${r.name}]` : '';
-                const guards = (r.guards?.length ?? 0) > 0 ? `  guards=${r.guards.join(',')}` : '';
-                const roles = (r.roles?.length ?? 0) > 0 ? `  roles=${r.roles.join(',')}` : '';
+                // Guards and roles are levels, each met by any of its names:
+                // `jwt & (jwt|api)`. A ream older than 0.2.32 keeps one flat
+                // list, which is a single level.
+                const levels = (list) => {
+                    const sets = (list ?? []).every(Array.isArray) ? (list ?? []) : [list];
+                    return sets.map((s) => s.length > 1 ? `(${s.join('|')})` : s.join('')).join(' & ');
+                };
+                const guards = (r.guards?.length ?? 0) > 0 ? `  guards=${levels(r.guards)}` : '';
+                const roles = (r.roles?.length ?? 0) > 0 ? `  roles=${levels(r.roles)}` : '';
                 console.log(`  ${r.method.padEnd(6)} ${r.path}${name}${guards}${roles}`);
             }
         }
@@ -1943,9 +1981,13 @@ pub fn run_tests(flags: &TestFlags<'_>, coverage: CoverageFlags<'_>) -> Result<(
 
     let options = test_options(flags, &coverage)?;
 
+    // The runner below only reads types and `@c9up/ream/env` from ream, so
+    // nothing would load `reflect-metadata` before a test file defines a
+    // decorated class: `@c9up/ream` is imported first for that, and it loads
+    // the package itself.
     let script = format!(
         r#"
-        import 'reflect-metadata';
+        import '@c9up/ream';
         const options = {};
         for (const key of Object.keys(options)) {{
             if (options[key] === null) delete options[key];
@@ -2139,7 +2181,21 @@ fn coverage_options(flags: &CoverageFlags<'_>) -> Result<serde_json::Value, Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{coverage_options, CoverageFlags, TestFlags};
+    use super::{console_script, coverage_options, CoverageFlags, TestFlags};
+
+    /// The inline console boot reaches `reflect-metadata` through `@c9up/ream`,
+    /// which loads it: the project does not have to declare that package.
+    #[test]
+    fn console_script_loads_the_polyfill_through_ream() {
+        let script = console_script(&["list".to_string()]);
+        assert!(!script.contains("reflect-metadata"), "{script}");
+        assert!(
+            script
+                .trim_start()
+                .starts_with("import { Ignitor, prettyPrintError } from '@c9up/ream';"),
+            "{script}"
+        );
+    }
 
     fn flags<'a>() -> CoverageFlags<'a> {
         CoverageFlags {

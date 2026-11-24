@@ -13,7 +13,7 @@ set -euo pipefail
 fail=0
 
 # `("pkg", "^range"),` — the shape the tables in src/scaffold.rs use.
-pins=$(grep -oE '\("(@c9up/[a-z-]+|reflect-metadata)", "\^[0-9][^"]*"\)' src/scaffold.rs)
+pins=$(grep -oE '\("@c9up/[a-z-]+", "\^[0-9][^"]*"\)' src/scaffold.rs)
 if [ -z "$pins" ]; then
   echo "::error::found no pins in src/scaffold.rs — has the table moved?"
   exit 1
@@ -22,7 +22,6 @@ fi
 while IFS= read -r pin; do
   pkg=$(printf '%s' "$pin" | sed -E 's/^\("([^"]+)".*/\1/')
   range=$(printf '%s' "$pin" | sed -E 's/.*"\^([^"]+)"\)$/\1/')
-  [ "$pkg" = "reflect-metadata" ] && continue
 
   if ! latest=$(npm view --fetch-timeout=30000 "$pkg" version 2>/dev/null); then
     echo "::error::cannot reach the registry for $pkg — refusing to guess"

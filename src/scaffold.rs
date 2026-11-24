@@ -200,8 +200,9 @@ pub fn run(destination: &str, options: &NewOptions<'_>) -> Result<(), String> {
     let env = env_file(name, database);
     // It holds the APP_KEY just minted and the database password.
     write_secret_file(root, ".env", &env)?;
-    // Committed (only `.env` is ignored): what a teammate who clones the
-    // project copies to `.env`, with every variable and none of the secrets.
+    // Committed (`.gitignore` keeps every other env file out): what a
+    // teammate who clones the project copies to `.env`, with every variable
+    // and none of the secrets.
     write_file(root, ".env.example", &env_example(&env))?;
     // The environment's TYPES come from `start/env.ts` — `Env.create` returns a
     // typed accessor, so `env.get('PORT')` is a number without a second
@@ -419,8 +420,7 @@ fn write_file_with_mode(root: &Path, path: &str, content: &str, mode: u32) -> Re
 /// from the first commit instead of growing throwaway `tsx bin/*.ts` scripts.
 /// Commands live in `commands/` and are discovered automatically; generate one
 /// with `ream make:command <name>`.
-const CONSOLE_ENTRY: &str = r##"import 'reflect-metadata'
-import { Ignitor, prettyPrintError } from '@c9up/ream'
+const CONSOLE_ENTRY: &str = r##"import { Ignitor, prettyPrintError } from '@c9up/ream'
 
 const APP_ROOT = new URL('../', import.meta.url)
 
@@ -465,9 +465,9 @@ const BASE_DEPS: &[(&str, &str)] = &[
     // template imports `@c9up/ream/session/config`, and the container cannot
     // build the body-parser or session middleware from a lazy import before it.
     ("@c9up/ream", "^0.2.16"),
-    // bin/server.ts imports it directly; with pnpm's strict node_modules a
-    // transitive copy (via @c9up/atlas) isn't resolvable, so declare it.
-    ("reflect-metadata", "^0.2"),
+    // No `reflect-metadata`: `@c9up/ream` depends on it and loads it at the top
+    // of its entry, and neither the generated files nor the CLI's own scripts
+    // import it from the project.
 ];
 
 /// Everything but `slim`, which stays at the framework alone.
@@ -478,12 +478,19 @@ const APP_DEPS: &[(&str, &str)] = &[
     ("@c9up/spectrum", "^0.1.12"),
 ];
 
-/// The full web stack on top: HTML templating, events, middleware, signing, and
+/// What every template serving HTTP from the rc file mounts: the protective
+/// headers, the shield, CORS and the rate limit.
+///
+/// 0.1.29 is the floor, not a preference: the kernels mount
+/// `@c9up/blackhole/server_middleware`, which does not exist before 0.1.24,
+/// and the releases between leave fixed security defects in place.
+const HTTP_DEPS: &[(&str, &str)] = &[("@c9up/blackhole", "^0.1.29")];
+
+/// The full web stack on top: HTML templating, events, signing, and
 /// date/recurrence.
 const WEB_DEPS: &[(&str, &str)] = &[
     ("@c9up/inker", "^0.1.15"),
     ("@c9up/echo", "^0.2.0"),
-    ("@c9up/blackhole", "^0.1.17"),
     ("@c9up/sigil", "^0.1.13"),
     ("@c9up/chronos", "^0.1.12"),
 ];
@@ -529,6 +536,9 @@ fn package_json(name: &str, template: &str) -> String {
     let mut deps: Vec<String> = BASE_DEPS.iter().map(quoted).collect();
     if template != "slim" {
         deps.extend(APP_DEPS.iter().map(quoted));
+    }
+    if boots_its_app(template) {
+        deps.extend(HTTP_DEPS.iter().map(quoted));
     }
     if template == "web" {
         deps.extend(WEB_DEPS.iter().map(quoted));
@@ -757,8 +767,9 @@ fn reamrc(template: &str) -> String {
             TESTS_BLOCK
         );
     }
+    // api: blackhole, for the protective headers its kernel mounts.
     format!(
-        "import {{ defineConfig }} from '@c9up/ream'\n\nexport default defineConfig({{\n  providers: [\n    () => import('@c9up/ream/events/provider'),\n    () => import('#providers/AppProvider.js'),\n  ],\n  preloads: [\n    () => import('#start/routes.js'),\n    () => import('#start/kernel.js'),\n  ],\n{}}})\n",
+        "import {{ defineConfig }} from '@c9up/ream'\n\nexport default defineConfig({{\n  providers: [\n    () => import('@c9up/blackhole/provider'),\n    () => import('@c9up/ream/events/provider'),\n    () => import('#providers/AppProvider.js'),\n  ],\n  preloads: [\n    () => import('#start/routes.js'),\n    () => import('#start/kernel.js'),\n  ],\n{}}})\n",
         TESTS_BLOCK
     )
 }
@@ -772,7 +783,7 @@ fn write_app_base(root: &Path, name: &str) -> Result<(), String> {
     write_file(
         root,
         "bin/server.ts",
-        "import 'reflect-metadata'\nimport { Ignitor, prettyPrintError } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\nconst APP_ROOT = new URL('../', import.meta.url)\n\n// PORT is deliberately NOT read here. `#start/env` is what loads `.env`, and\n// it runs in `booting()` below, so a port read now would only ever see the\n// shell's environment. The Ignitor reads it when it binds.\nnew Ignitor(APP_ROOT, {\n  serverFactory: createHyperServerFactory(),\n})\n  .tap((app) => {\n    // Validates the environment against start/env.ts before anything boots,\n    // so a missing APP_KEY stops the app here rather than on the first\n    // response that tries to sign a cookie.\n    app.booting(async () => {\n      await import('#start/env.js')\n    })\n  })\n  .useRcFile((await import('../reamrc.js')).default)\n  .httpServer()\n  .start()\n  .then(async (app) => {\n    // Ask the server what it BOUND rather than recomputing it: in development an\n    // occupied port is stepped past, and a banner that guesses sends you to an\n    // address nothing is listening on.\n    console.log(`\\n  ➜ Ream ready on http://${app.host()}:${await app.port()}\\n`)\n  })\n  .catch((err) => {\n    prettyPrintError(err)\n    process.exit(1)\n  })\n",
+        "import { Ignitor, prettyPrintError } from '@c9up/ream'\nimport { createHyperServerFactory } from '@c9up/ream/bootstrap'\n\nconst APP_ROOT = new URL('../', import.meta.url)\n\n// PORT is deliberately NOT read here. `#start/env` is what loads `.env`, and\n// it runs in `booting()` below, so a port read now would only ever see the\n// shell's environment. The Ignitor reads it when it binds.\nnew Ignitor(APP_ROOT, {\n  serverFactory: createHyperServerFactory(),\n})\n  .tap((app) => {\n    // Validates the environment against start/env.ts before anything boots,\n    // so a missing APP_KEY stops the app here rather than on the first\n    // response that tries to sign a cookie.\n    app.booting(async () => {\n      await import('#start/env.js')\n    })\n  })\n  .useRcFile((await import('../reamrc.js')).default)\n  .httpServer()\n  .start()\n  .then(async (app) => {\n    // Ask the server what it BOUND rather than recomputing it: in development an\n    // occupied port is stepped past, and a banner that guesses sends you to an\n    // address nothing is listening on.\n    console.log(`\\n  ➜ Ream ready on http://${app.host()}:${await app.port()}\\n`)\n  })\n  .catch((err) => {\n    prettyPrintError(err)\n    process.exit(1)\n  })\n",
     )?;
     write_file(root, "providers/AppProvider.ts", "import { Provider } from '@c9up/ream'\n\nexport default class AppProvider extends Provider {\n  register() {}\n  async boot() {}\n  async start() {}\n  async ready() {}\n  async shutdown() {}\n}\n")?;
     write_file(root, "start/routes.ts", &format!("import router from '@c9up/ream/services/router'\n\nrouter.get('/', async ({{ response }}) => {{\n  response.status(200).json({{ name: '{}', status: 'running' }})\n}})\n", name))?;
@@ -784,40 +795,98 @@ fn write_api_template(root: &Path, name: &str) -> Result<(), String> {
     // The body parser is what parses a request body: without it every JSON
     // POST reads as `{}`. Router middleware, so it only runs for a matched
     // route; its settings come from `config/bodyparser.ts` when the app adds one.
+    //
+    // Blackhole in two halves, as `ream configure @c9up/blackhole` mounts it:
+    // the server half answers every request, a 404 included (headers, shield,
+    // CORS, rate limit); the router half runs after the body parser.
     write_file(
         root,
         "start/kernel.ts",
         r#"import router from '@c9up/ream/services/router'
 import server from '@c9up/ream/services/server'
 
+/**
+ * The server middleware stack runs on every request, even one no route
+ * matches: the protective headers, CORS and the rate limit reach a 404 too.
+ */
 server.use([
   async (ctx, next) => {
     const start = Date.now()
     await next()
     ctx.response.header('x-response-time', `${Date.now() - start}ms`)
   },
+  () => import('@c9up/blackhole/server_middleware'),
 ])
 
+/**
+ * The router middleware stack runs on every request with a matched route.
+ */
 router.use([
   () => import('@c9up/ream/bodyparser_middleware'),
+  () => import('@c9up/blackhole/middleware'),
 ])
+"#,
+    )?;
+
+    // The headers that matter for a JSON API, and a CORS policy that allows
+    // no origin until one is listed: the upstream API kit's shield and cors
+    // settings (CSRF and CSP off, X-Frame DENY, HSTS, nosniff, credentials).
+    //
+    // NAMED DEVIATION (safer) — upstream reflects every origin in development
+    // (`origin: app.inDev ? true : []`). With `credentials: true` that hands
+    // any site the developer's cookies, and blackhole refuses the pair at
+    // boot, so the list starts empty in every environment.
+    write_file(
+        root,
+        "config/blackhole.ts",
+        r#"import { defineConfig } from '@c9up/blackhole/config'
+
+export default defineConfig({
+  // An API authenticates with tokens, which a browser does not attach to a
+  // cross-site request on its own: no CSRF token to check. Turn it on (with
+  // `secret`) if this API ever authenticates with a cookie.
+  csrf: false,
+
+  // A content security policy guards HTML pages; an API serves none.
+  csp: { enabled: false },
+
+  // Each on with a hardened default; turn one off with `{ enabled: false }`.
+  xFrame: { enabled: true, action: 'DENY' },
+  hsts: { enabled: true, maxAge: '180 days' },
+  contentTypeSniffing: { enabled: true },
+
+  // Which web pages may call this API from a browser. None until you list
+  // them, e.g. `origin: ['https://app.example.com']`.
+  cors: {
+    origin: [],
+    credentials: true,
+  },
+})
 "#,
     )?;
     Ok(())
 }
 
-/// Web template — the api skeleton plus the session/cookie auth kit:
-/// a security-aware kernel (blackhole signed-CSRF + cookie session), the
-/// session auth middleware, and auth + blackhole config. Mirrors the proven
-/// kitchen-sink wiring so `ream new web` boots a cookie-authed app out of the box.
+/// Web template — the api skeleton plus the session/cookie auth kit: a
+/// security-aware kernel (blackhole's two halves, cookie session, silent
+/// auth), the refusing `auth` middleware, and auth + blackhole config, in the
+/// shape of the upstream web kit's kernel.
 fn write_web_template(root: &Path, name: &str) -> Result<(), String> {
     write_app_base(root, name)?;
 
-    // Kernel: body parser → cookie session → blackhole (signed CSRF + headers)
-    // → auth middleware. The order is load-bearing twice over. CSRF runs AFTER
-    // the body parser because the token of a form post arrives IN the body, and
-    // session runs BEFORE auth so `ctx.session` is populated when
-    // `@Guard('session')` resolves the user.
+    // Server tier: blackhole's server half answers every request, one no route
+    // matches included, so a 404 carries the protective headers and the rate
+    // limit counts it, as `ream configure @c9up/blackhole` mounts it.
+    //
+    // Router tier: body parser → cookie session → blackhole (signed CSRF) →
+    // silent auth. CSRF runs AFTER the body parser because the token of a form
+    // post arrives IN the body, and the session runs BEFORE silent auth so the
+    // session guard finds the signed-in user.
+    //
+    // Silent auth only reads who is signed in, through warden's authenticator,
+    // which records the guard that vouched (`authenticatedViaGuard`): that is
+    // what a route's `.guard('session')` checks. Refusing is the job of the
+    // named `auth` middleware, the name it has everywhere else.
     //
     // Each entry is a lazy import of a middleware CLASS, which is all
     // `router.use()` takes: the container builds it, and its settings come from
@@ -826,13 +895,38 @@ fn write_web_template(root: &Path, name: &str) -> Result<(), String> {
         root,
         "start/kernel.ts",
         r#"import router from '@c9up/ream/services/router'
+import server from '@c9up/ream/services/server'
 
+/**
+ * The server middleware stack runs on every request, even one no route
+ * matches: the protective headers and the rate limit reach a 404 too.
+ */
+server.use([
+  () => import('@c9up/blackhole/server_middleware'),
+])
+
+/**
+ * The router middleware stack runs on every request with a matched route.
+ * Silent auth reads who is signed in and never refuses anybody.
+ */
 router.use([
   () => import('@c9up/ream/bodyparser_middleware'),
   () => import('@c9up/ream/session_middleware'),
   () => import('@c9up/blackhole/middleware'),
-  () => import('#middleware/auth_middleware.js'),
+  () => import('@c9up/warden/silent-auth'),
 ])
+
+/**
+ * Named middleware, attached to the routes or groups that need it:
+ *
+ *   router.get('/dashboard', handler).use(middleware.auth())
+ *
+ * refuses a request nobody is signed in to. `.guard('session')` on a route
+ * does the same through the route gate.
+ */
+export const middleware = router.named({
+  auth: () => import('#middleware/auth_middleware.js'),
+})
 "#,
     )?;
 
@@ -894,49 +988,10 @@ export default defineConfig({
 "#,
     )?;
 
-    // Auth middleware: populate `ctx.auth` from the cookie session. The guard
-    // enforcer (`@Guard('session')`) then asserts authentication per route.
-    write_file(
-        root,
-        "app/middleware/auth_middleware.ts",
-        r#"import type { HttpContext } from '@c9up/ream'
-import type { AuthResult } from '@c9up/warden'
-import auth from '@c9up/warden/services/main'
-
-interface StrategyWithContext {
-  verifyWithContext(token: string, ctx: { session?: unknown }): Promise<AuthResult>
-}
-
-function hasVerifyWithContext(value: unknown): value is StrategyWithContext {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'verifyWithContext' in value &&
-    typeof value.verifyWithContext === 'function'
-  )
-}
-
-export default class AuthMiddleware {
-  async handle(ctx: HttpContext, next: () => Promise<void>) {
-    if (ctx.session && auth.getStrategyNames().includes('session')) {
-      const strategy = auth.getStrategy('session')
-      if (hasVerifyWithContext(strategy)) {
-        const result = await strategy.verifyWithContext('', { session: ctx.session })
-        if (result.authenticated && result.user) {
-          ctx.auth = {
-            isAuthenticated: true,
-            user: result.user,
-            roles: result.user.roles ?? [],
-            permissions: result.user.permissions ?? [],
-          }
-        }
-      }
-    }
-    await next()
-  }
-}
-"#,
-    )?;
+    // The refusing middleware, under the name it has in the upstream kit and
+    // in the auth guide. It authenticates with warden's authenticator, which
+    // silent auth has already put on `ctx.auth`.
+    write_file(root, "app/middleware/auth_middleware.ts", AUTH_MIDDLEWARE)?;
 
     Ok(())
 }
@@ -955,7 +1010,57 @@ fn write_microservice_template(root: &Path, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-const GITIGNORE: &str = "node_modules/\ndist/\n.env\n*.sqlite\ndata/\n";
+/// `app/middleware/auth_middleware.ts` of the web template.
+///
+/// The upstream kit's `auth` middleware: `authenticateUsing(guards)` throws
+/// `E_UNAUTHORIZED_ACCESS` when no guard vouches for the request. Without
+/// warden's authenticator on `ctx.auth` (no `@c9up/warden/provider`), nobody
+/// can be signed in, and the request is refused with the same body.
+const AUTH_MIDDLEWARE: &str = r#"import type { HttpContext } from '@c9up/ream'
+
+/**
+ * Refuses a request nobody is signed in to. Registered as the named `auth`
+ * middleware in start/kernel.ts:
+ *
+ *   router.get('/dashboard', handler).use(middleware.auth())
+ *   router.get('/admin', handler).use(middleware.auth({ guards: ['session'] }))
+ *
+ * `@c9up/warden/silent-auth`, which runs on every route, only reads who is
+ * signed in: this middleware is the one that refuses.
+ */
+export default class AuthMiddleware {
+  /**
+   * Where a browser is sent when nobody is signed in, e.g. '/login'. Left
+   * unset, the request is answered 401.
+   */
+  redirectTo: string | undefined = undefined
+
+  async handle(
+    ctx: HttpContext,
+    next: () => Promise<void>,
+    options: { guards?: string[] } = {}
+  ) {
+    if (typeof ctx.auth.authenticateUsing !== 'function') {
+      ctx.response
+        .status(401)
+        .json({ error: { code: 'E_UNAUTHORIZED_ACCESS', message: 'Unauthorized access' } })
+      return
+    }
+    await ctx.auth.authenticateUsing(options.guards, { loginRoute: this.redirectTo })
+    await next()
+  }
+}
+"#;
+
+/// What a new project keeps out of git.
+///
+/// The secrets: every environment file the loader reads that is not
+/// `.env.example` (`.env.<NODE_ENV>.local`, `.env.local`, `.env`; the
+/// `.env.<NODE_ENV>` files are the shared, committed defaults), the update
+/// signing key `ream generate:update-key` writes, and an Android release
+/// keystore, which `ream android:build --release` tells the developer to
+/// create.
+const GITIGNORE: &str = "node_modules/\ndist/\n*.sqlite\ndata/\n\n# Secrets\n.env\n.env.local\n.env.*.local\nrobledo.key\n*.keystore\n";
 
 /// The dependencies whose install scripts a scaffolded app approves.
 ///
@@ -1437,6 +1542,39 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// `@c9up/ream` loads `reflect-metadata` at the top of its entry, so a
+    /// scaffolded project neither imports it nor declares it: the entries
+    /// import `@c9up/ream` first, which is what defines the decorated classes
+    /// after the polyfill.
+    #[test]
+    fn scaffold_leaves_reflect_metadata_to_ream() {
+        assert!(!CONSOLE_ENTRY.contains("reflect-metadata"));
+        assert!(CONSOLE_ENTRY.starts_with("import { Ignitor, prettyPrintError } from '@c9up/ream'"));
+        for template in ["api", "web", "slim", "microservice"] {
+            assert!(
+                !package_json("demo", template).contains("reflect-metadata"),
+                "{template}: package.json must not declare reflect-metadata"
+            );
+        }
+        for (template, name) in [("api", "rm-api"), ("web", "rm-web"), ("slim", "rm-slim")] {
+            let root = unique_root(name);
+            match template {
+                "api" => write_api_template(&root, "demo").unwrap(),
+                "web" => write_web_template(&root, "demo").unwrap(),
+                _ => write_slim_template(&root, "demo").unwrap(),
+            }
+            let bin = fs::read_to_string(root.join("bin/server.ts")).unwrap();
+            assert!(
+                bin.lines()
+                    .next()
+                    .is_some_and(|first| first.ends_with("from '@c9up/ream'")),
+                "{template}: bin/server.ts must import @c9up/ream first — got:\n{bin}"
+            );
+            assert!(!bin.contains("reflect-metadata"), "{template}: {bin}");
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
     /// The port comes from the environment, and the environment is not loaded
     /// until `booting()` runs. A scaffold that reads PORT at construction bound
     /// 3000 while announcing whatever `.env` said — the banner lied because the
@@ -1614,38 +1752,53 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// The block a kernel passes to `<call>([` ... `])`, or "" when it has none.
+    fn stack<'a>(kernel: &'a str, call: &str) -> &'a str {
+        kernel
+            .find(&format!("{call}(["))
+            .and_then(|start| {
+                kernel[start..]
+                    .find("])")
+                    .map(|end| &kernel[start..start + end])
+            })
+            .unwrap_or("")
+    }
+
     /// The web template must pre-wire the session/cookie auth kit: a kernel
-    /// registering the body parser, the session and blackhole ahead of the auth
-    /// middleware, a session-first `config/auth.ts`, signed-CSRF
-    /// `config/blackhole.ts`, a cookie `config/session.ts`, and the session auth
-    /// middleware.
+    /// registering the body parser, the session, blackhole and silent auth, a
+    /// session-first `config/auth.ts`, signed-CSRF `config/blackhole.ts`, a
+    /// cookie `config/session.ts`, and the refusing `auth` middleware.
     #[test]
     fn web_template_prewires_session_auth() {
         let root = unique_root("web-template");
         write_web_template(&root, "demo").unwrap();
 
         let kernel = fs::read_to_string(root.join("start/kernel.ts")).unwrap();
+        let router_stack = stack(&kernel, "router.use");
         for entry in [
             "@c9up/ream/bodyparser_middleware",
             "@c9up/ream/session_middleware",
             "@c9up/blackhole/middleware",
-            "#middleware/auth_middleware.js",
+            "@c9up/warden/silent-auth",
         ] {
             assert!(
-                kernel.contains(&format!("() => import('{entry}')")),
-                "web kernel must register {entry} as a lazy class import — got:\n{kernel}"
+                router_stack.contains(&format!("() => import('{entry}')")),
+                "web kernel must register {entry} in router.use([...]) — got:\n{kernel}"
             );
         }
         // CSRF reads the token out of a form post, so it cannot run before the
         // body has been parsed.
         assert!(
-            kernel.find("bodyparser_middleware") < kernel.find("blackhole/middleware"),
+            router_stack.find("bodyparser_middleware") < router_stack.find("blackhole/middleware"),
             "the body parser must run before CSRF — got:\n{kernel}"
         );
-        // And the session has to exist before the guard reads a user from it.
+        // The session has to exist before silent auth reads a user from it,
+        // and before CSRF binds its token to it.
         assert!(
-            kernel.find("session_middleware") < kernel.find("auth_middleware"),
-            "the session must run before the auth middleware — got:\n{kernel}"
+            router_stack.find("session_middleware") < router_stack.find("silent-auth")
+                && router_stack.find("session_middleware")
+                    < router_stack.find("blackhole/middleware"),
+            "the session must run before silent auth and CSRF — got:\n{kernel}"
         );
 
         let session = fs::read_to_string(root.join("config/session.ts")).unwrap();
@@ -1671,8 +1824,191 @@ mod tests {
 
         assert!(
             root.join("app/middleware/auth_middleware.ts").exists(),
-            "web template must write the session auth middleware"
+            "web template must write the auth middleware"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The global middleware only reads who is signed in, under its own
+    /// name; `auth_middleware` / `AuthMiddleware` is the one that refuses, and
+    /// it is a NAMED middleware, attached to the routes that need a user.
+    ///
+    /// A hand-written global `AuthMiddleware` filled `ctx.auth` without the
+    /// guard that vouched for the user, so `.guard('session')` refused every
+    /// signed-in request, and its name made every route look protected.
+    #[test]
+    fn web_auth_is_silent_globally_and_refusing_by_name() {
+        let root = unique_root("web-auth");
+        write_web_template(&root, "demo").unwrap();
+        let kernel = fs::read_to_string(root.join("start/kernel.ts")).unwrap();
+
+        // Warden's silent auth puts its authenticator on `ctx.auth`, which
+        // records `authenticatedViaGuard`.
+        assert!(
+            stack(&kernel, "router.use").contains("() => import('@c9up/warden/silent-auth')"),
+            "{kernel}"
+        );
+        // The refusing middleware is not global.
+        assert!(
+            !stack(&kernel, "router.use").contains("auth_middleware")
+                && !stack(&kernel, "server.use").contains("auth_middleware"),
+            "auth_middleware refuses: it must not run on every route — got:\n{kernel}"
+        );
+        let named = kernel
+            .find("export const middleware = router.named({")
+            .map(|start| &kernel[start..])
+            .unwrap_or("");
+        assert!(
+            named.contains("auth: () => import('#middleware/auth_middleware.js'),"),
+            "the refusing middleware is the named `auth` one — got:\n{kernel}"
+        );
+
+        let middleware =
+            fs::read_to_string(root.join("app/middleware/auth_middleware.ts")).unwrap();
+        assert!(
+            middleware.contains("export default class AuthMiddleware"),
+            "{middleware}"
+        );
+        // It refuses through warden's authenticator with the guards asked
+        // for, and answers 401 itself when no authenticator is there.
+        assert!(
+            middleware.contains(
+                "await ctx.auth.authenticateUsing(options.guards, { loginRoute: this.redirectTo })"
+            ),
+            "{middleware}"
+        );
+        assert!(
+            middleware.contains("typeof ctx.auth.authenticateUsing !== 'function'")
+                && middleware.contains(".status(401)")
+                && middleware.contains("E_UNAUTHORIZED_ACCESS"),
+            "{middleware}"
+        );
+        // `next()` only after the authentication succeeded: the refusal path
+        // returns before it, and nothing fills `ctx.auth` by hand.
+        let refusal = middleware.find("return\n").unwrap();
+        let next = middleware.find("await next()").unwrap();
+        assert!(refusal < next, "{middleware}");
+        assert_eq!(
+            middleware.matches("await next()").count(),
+            1,
+            "{middleware}"
+        );
+        assert!(!middleware.contains("ctx.auth = "), "{middleware}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Blackhole in its two halves, as `ream configure @c9up/blackhole`
+    /// mounts it: the server half sees a request no route matches (whose 404
+    /// is raised before any router middleware runs), so that response carries
+    /// the protective headers and the rate limit counts it; the router half
+    /// runs CSRF after the body parser.
+    #[test]
+    fn http_templates_mount_both_halves_of_blackhole() {
+        for template in ["api", "web"] {
+            let root = unique_root(&format!("blackhole-{template}"));
+            if template == "api" {
+                write_api_template(&root, "demo").unwrap();
+            } else {
+                write_web_template(&root, "demo").unwrap();
+            }
+            let kernel = fs::read_to_string(root.join("start/kernel.ts")).unwrap();
+            assert!(
+                kernel.contains("import server from '@c9up/ream/services/server'"),
+                "{template}: {kernel}"
+            );
+            assert!(
+                stack(&kernel, "server.use")
+                    .contains("() => import('@c9up/blackhole/server_middleware')"),
+                "{template}: the server half must be on the server tier — got:\n{kernel}"
+            );
+            let router_stack = stack(&kernel, "router.use");
+            assert!(
+                router_stack.contains("() => import('@c9up/blackhole/middleware')"),
+                "{template}: the router half must be on the router tier — got:\n{kernel}"
+            );
+            assert!(
+                router_stack.find("bodyparser_middleware")
+                    < router_stack.find("blackhole/middleware"),
+                "{template}: {kernel}"
+            );
+            assert!(
+                reamrc(template).contains("() => import('@c9up/blackhole/provider'),"),
+                "{template}: {}",
+                reamrc(template)
+            );
+            assert!(
+                package_json("demo", template).contains("\"@c9up/blackhole\": \"^0.1.29\""),
+                "{template}: {}",
+                package_json("demo", template)
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
+        // The templates that serve no HTTP from the rc file do not carry it.
+        for template in ["slim", "microservice"] {
+            assert!(
+                !package_json("demo", template).contains("@c9up/blackhole"),
+                "{template}"
+            );
+            assert!(!reamrc(template).contains("blackhole"), "{template}");
+        }
+    }
+
+    /// Every file the env loader reads as a local override, and the keys the
+    /// CLI writes or asks for, stay out of git; `.env.example` and the shared
+    /// `.env.<NODE_ENV>` defaults are committed. Checked by git itself.
+    #[test]
+    fn the_gitignore_keeps_the_secrets_out() {
+        let root = unique_root("gitignore");
+        fs::write(root.join(".gitignore"), GITIGNORE).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .expect("run git")
+        };
+        assert!(git(&["init", "-q", "."]).status.success());
+        let ignored = |path: &str| git(&["check-ignore", "-q", path]).status.success();
+        for secret in [
+            ".env",
+            ".env.local",
+            ".env.production.local",
+            ".env.development.local",
+            ".env.test.local",
+            "robledo.key",
+            "release.keystore",
+            "android/release.keystore",
+        ] {
+            assert!(ignored(secret), "{secret} must be ignored");
+        }
+        for committed in [".env.example", ".env.production", "start/env.ts"] {
+            assert!(!ignored(committed), "{committed} must be committed");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The api template's protective headers, as the upstream API kit sets
+    /// them: X-Frame DENY, HSTS, nosniff, CSRF and CSP off (a token API serves
+    /// no HTML), and a CORS policy that allows no origin until one is listed.
+    #[test]
+    fn api_template_config_hardens_a_json_api() {
+        let root = unique_root("api-blackhole-config");
+        write_api_template(&root, "demo").unwrap();
+        let config = fs::read_to_string(root.join("config/blackhole.ts")).unwrap();
+        for line in [
+            "import { defineConfig } from '@c9up/blackhole/config'",
+            "csrf: false,",
+            "csp: { enabled: false },",
+            "xFrame: { enabled: true, action: 'DENY' },",
+            "hsts: { enabled: true, maxAge: '180 days' },",
+            "contentTypeSniffing: { enabled: true },",
+            "origin: [],",
+            "credentials: true,",
+        ] {
+            assert!(config.contains(line), "missing `{line}` in:\n{config}");
+        }
+        // With CSRF off nothing is signed: the key stays out of this file.
+        assert!(!config.contains("APP_KEY"), "{config}");
         let _ = fs::remove_dir_all(&root);
     }
 

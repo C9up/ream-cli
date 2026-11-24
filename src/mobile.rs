@@ -562,15 +562,21 @@ fn xml_escape(s: &str) -> String {
         .replace('\'', "\\'")
 }
 
+/// Write a generated file under `.ream/`. A link or a non-regular file at
+/// the destination is refused, as `generate:key` refuses one: `.ream/` sits in
+/// the project, and a repository that commits a link there would otherwise
+/// have every build write into the file it points to.
 fn write(path: &Path, contents: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
     // Rewritten only when it changed, so Gradle's up-to-date checks hold.
-    if std::fs::read(path).ok().as_deref() == Some(contents) {
+    if crate::commands::regular_file_or_absent(path)?
+        && std::fs::read(path).ok().as_deref() == Some(contents)
+    {
         return Ok(());
     }
-    std::fs::write(path, contents).map_err(|e| format!("{}: {e}", path.display()))
+    crate::commands::write_regular_file(path, contents, 0o666)
 }
 
 /// The outermost directory above `root` (or `root` itself) that is a
@@ -1000,12 +1006,12 @@ pub fn generate(
     let updates_config = main.join("assets/ream-updates.json");
     match &config.updates {
         Some(updates) => {
-            let value = serde_json::json!({
-                "url": updates.url,
-                "publicKey": updates.public_key,
-                "runtimeVersion": runtime_version(layout, natives),
-                "platform": "android",
-            });
+            let value = updates_config_json(
+                config,
+                updates,
+                &runtime_version(layout, natives),
+                now_seconds()?,
+            );
             write(&updates_config, value.to_string().as_bytes())?;
         }
         None => {
@@ -1486,6 +1492,62 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Now, in whole seconds since the Unix epoch: what orders updates on the
+/// phone. robledo refuses a `createdAt` of 0, so a clock before 1970 is an
+/// error, never a zero stamp.
+fn now_seconds() -> Result<u64, String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+        .filter(|&t| t > 0)
+        .ok_or_else(|| "The system clock is set before 1970: fix it before building".to_string())
+}
+
+/// `assets/ream-updates.json`, what robledo reads at the app's start:
+/// - `embeddedCreatedAt`, when this build ran (seconds): the bundle inside the
+///   app is at least that recent, so an update published before it is
+///   refused, and dropped at launch once a store release brings this build;
+/// - `appId`, the Android `applicationId`: an update must name the same app,
+///   so one signed for another app with the same key is refused.
+fn updates_config_json(
+    config: &MobileConfig,
+    updates: &Updates,
+    runtime: &str,
+    built_at: u64,
+) -> Value {
+    serde_json::json!({
+        "url": updates.url,
+        "publicKey": updates.public_key,
+        "runtimeVersion": runtime,
+        "platform": "android",
+        "embeddedCreatedAt": built_at,
+        "appId": config.id,
+    })
+}
+
+/// The manifest `android:publish` signs: its exact bytes are what the phone
+/// verifies. `createdAt` orders it after every update and build before it;
+/// `appId` ties it to the app whose `applicationId` it names.
+fn update_manifest(
+    id: &str,
+    created_at: u64,
+    app_id: &str,
+    runtime: &str,
+    files: Vec<Value>,
+) -> String {
+    serde_json::json!({
+        "id": id,
+        "createdAt": created_at,
+        "appId": app_id,
+        "runtimeVersion": runtime,
+        "platform": "android",
+        "launch": "index.android.bundle",
+        "files": files,
+    })
+    .to_string()
+}
+
 /// The 32-byte Ed25519 seed `android:publish` signs with: REAM_UPDATES_KEY
 /// (base64), else the key file.
 fn signing_key(key_file: &Path) -> Result<ed25519_dalek::SigningKey, String> {
@@ -1507,9 +1569,15 @@ fn signing_key(key_file: &Path) -> Result<ed25519_dalek::SigningKey, String> {
 }
 
 /// `ream generate:update-key`: a new key pair for signing updates.
+///
+/// The destination is checked the way `generate:key` checks `.env`: a
+/// repository that commits `robledo.key` as a link would otherwise carry the
+/// private key wherever the link points (into `public/`, say), so a link or a
+/// non-regular file is refused by name and nothing is written.
 pub fn run_generate_update_key(out: Option<&str>, force: bool) -> Result<(), String> {
     let path = PathBuf::from(out.unwrap_or("robledo.key"));
-    if path.exists() && !force {
+    let present = crate::commands::regular_file_or_absent(&path)?;
+    if present && !force {
         return Err(format!(
             "{} exists: a new key would make every installed app refuse the next update. --force replaces it",
             path.display()
@@ -1519,26 +1587,22 @@ pub fn run_generate_update_key(out: Option<&str>, force: bool) -> Result<(), Str
     getrandom::fill(&mut seed).map_err(|e| format!("No randomness from the system: {e}"))?;
     let key = ed25519_dalek::SigningKey::from_bytes(&seed);
     let encoded = base64::engine::general_purpose::STANDARD.encode(seed);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    use std::io::Write;
-    options
-        .open(&path)
-        .and_then(|mut file| file.write_all(format!("{encoded}\n").as_bytes()))
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    // 0600 whether the file is created or replaced: `--force` over a file
+    // readable by others restricts it before the key is written.
+    crate::commands::write_owner_only_file(&path, format!("{encoded}\n").as_bytes())?;
     let public = base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
+    let readable = if cfg!(unix) {
+        " (readable by you only)"
+    } else {
+        ""
+    };
     crate::ui::success(&format!(
-        "Wrote the update signing key to {} (readable by you only)",
+        "Wrote the update signing key to {}{readable}",
         path.display()
     ));
     println!("\n  mobile.updates.publicKey: '{public}'\n");
     crate::ui::info(
-        "Put the public key in reamrc.ts. Keep the private key out of git (add it to .gitignore); on CI, pass it as REAM_UPDATES_KEY.",
+        "Put the public key in reamrc.ts. Keep the private key out of git (a project made by `ream new` already ignores robledo.key); on CI, pass it as REAM_UPDATES_KEY.",
     );
     Ok(())
 }
@@ -1669,20 +1733,9 @@ pub fn run_publish(key_file: Option<&str>) -> Result<(), String> {
         }
         entries.push(serde_json::json!({ "path": path, "sha256": digest, "size": bytes.len() }));
     }
-    let created = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let created = now_seconds()?;
     let id = format!("{created}-{}", bundle_digest.get(..8).unwrap_or("0"));
-    let manifest = serde_json::json!({
-        "id": id,
-        "createdAt": created,
-        "runtimeVersion": runtime,
-        "platform": "android",
-        "launch": "index.android.bundle",
-        "files": entries,
-    })
-    .to_string();
+    let manifest = update_manifest(&id, created, &config.id, &runtime, entries);
     use ed25519_dalek::Signer;
     let signature =
         base64::engine::general_purpose::STANDARD.encode(key.sign(manifest.as_bytes()).to_bytes());
@@ -2100,9 +2153,15 @@ mod tests {
         assert!(app.contains("System.getenv(\"REAM_ANDROID_STORE_PASSWORD\")"));
         assert!(read("app/src/main/AndroidManifest.xml").contains("android.permission.CAMERA"));
         assert!(read("app/src/main/res/values/strings.xml").contains("Tessel &amp; co"));
-        assert!(
-            read("app/src/main/java/ch/c9up/tessel/MainActivity.kt").starts_with("// Generated")
-        );
+        let activity = read("app/src/main/java/ch/c9up/tessel/MainActivity.kt");
+        assert!(activity.starts_with("// Generated"));
+        // The launcher is exported: any app can start it with extras, so none
+        // reaches the root component (React Native's default, no launch props).
+        assert!(!activity.contains("getLaunchOptions"), "{activity}");
+        assert!(!activity.contains("intent.extras"), "{activity}");
+        assert!(activity.contains(
+            "override fun createReactActivityDelegate(): ReactActivityDelegate =\n    DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled)\n"
+        ));
         let cmake = read("app/src/main/jni/CMakeLists.txt");
         assert!(cmake.contains("orbit.cmake\")\norbit_link(${CMAKE_PROJECT_NAME})"));
         let onload = read("app/src/main/jni/OnLoad.cpp");
@@ -2139,6 +2198,23 @@ mod tests {
             .join("app/src/main/java/ch/c9up/tessel")
             .exists());
         let config = renamed;
+        // A generated file the repository replaced with a link is refused, and
+        // the file it points to is left alone.
+        #[cfg(unix)]
+        {
+            let elsewhere = root.join("elsewhere.txt");
+            std::fs::write(&elsewhere, "not a gradle file\n").unwrap();
+            let gradle = layout.android.join("app/build.gradle");
+            std::fs::remove_file(&gradle).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &gradle).unwrap();
+            let refused = generate(&layout, &config, &natives, "27.1.12297006").unwrap_err();
+            assert!(refused.contains("symbolic link"), "{refused}");
+            assert_eq!(
+                std::fs::read_to_string(&elsewhere).unwrap(),
+                "not a gradle file\n"
+            );
+            std::fs::remove_file(&gradle).unwrap();
+        }
         // Without orbit there is nothing to render with.
         assert!(generate(&layout, &config, &[], "27")
             .unwrap_err()
@@ -2288,7 +2364,9 @@ mod tests {
         )
         .unwrap();
         let natives = vec![orbit, robledo];
+        let before = now_seconds().unwrap();
         generate(&layout, &config, &natives, "27").unwrap();
+        let after = now_seconds().unwrap();
         let app = std::fs::read_to_string(
             layout
                 .android
@@ -2308,6 +2386,15 @@ mod tests {
             written["runtimeVersion"],
             runtime_version(&layout, &natives)
         );
+        assert_eq!(written["platform"], "android");
+        // robledo's store-release floor: when this build ran, a number of
+        // seconds (robledo refuses anything else).
+        let embedded = written["embeddedCreatedAt"].as_u64().unwrap();
+        assert!((before..=after).contains(&embedded));
+        // robledo's app check: the applicationId the Gradle build installs as.
+        assert_eq!(written["appId"], "ch.c9up.a");
+        let gradle = std::fs::read_to_string(layout.android.join("app/build.gradle")).unwrap();
+        assert!(gradle.contains("applicationId \"ch.c9up.a\""));
         // https: no cleartext allowance.
         assert!(!layout
             .android
@@ -2340,6 +2427,61 @@ mod tests {
         assert!(generate(&layout, &config, &twice, "27")
             .unwrap_err()
             .contains("keep one"));
+    }
+
+    /// The app config a build writes and a manifest `android:publish` signs,
+    /// byte for byte. robledo-client (`parse_config`, `parse_manifest`,
+    /// `Store::begin`) accepts this exact pair, refuses the manifest for an app
+    /// with another id, and refuses it under a store build made after it: a
+    /// change to either encoding fails here before installed apps refuse it.
+    const SIGNED_CONFIG: &str = r#"{"url":"https://x.example/__robledo","publicKey":"6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=","runtimeVersion":"rt1","platform":"android","embeddedCreatedAt":1780000000,"appId":"ch.c9up.a"}"#;
+    const SIGNED_MANIFEST: &str = r#"{"id":"1780272000-1e6ed65d","createdAt":1780272000,"appId":"ch.c9up.a","runtimeVersion":"rt1","platform":"android","launch":"index.android.bundle","files":[{"path":"index.android.bundle","sha256":"1e6ed65d77d6364eeaed5a745ba5c4985ae2b700dd85d7cf7f027bdf294a33fc","size":6}]}"#;
+    const SIGNED_SIGNATURE: &str =
+        "EDhmtsDSSXtlABe7qqxxo2F1jcLLtZXNZpFxqE3CRgK5ejXwg7Y7xK3ZM9NKBmwcY5O9mK4136xGAHg+1X+JBw==";
+
+    #[test]
+    fn writes_and_signs_what_robledo_checks_against_replay_and_other_apps() {
+        use ed25519_dalek::{Signer, Verifier};
+        let root = project("signed");
+        let config = parse_config(
+            &json!({ "mobile": { "name": "A", "id": "ch.c9up.a", "entry": "mobile/index.ts",
+                                 "updates": { "url": "https://x.example/__robledo", "publicKey": public_key() } } }),
+            &root,
+        )
+        .unwrap();
+        let updates = config.updates.as_ref().unwrap();
+        let app_config = updates_config_json(&config, updates, "rt1", 1_780_000_000).to_string();
+        assert_eq!(app_config, SIGNED_CONFIG);
+
+        let bundle = b"bundle";
+        let digest = hex(&Sha256::digest(bundle));
+        let files =
+            vec![json!({ "path": "index.android.bundle", "sha256": digest, "size": bundle.len() })];
+        let id = format!("1780272000-{}", digest.get(..8).unwrap());
+        let manifest = update_manifest(&id, 1_780_272_000, &config.id, "rt1", files);
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let signature = key.sign(manifest.as_bytes());
+        assert_eq!(manifest, SIGNED_MANIFEST);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
+            SIGNED_SIGNATURE
+        );
+
+        // What the phone does with them: the signature covers the manifest's
+        // exact bytes, checked against the key the build wrote.
+        let app: Value = serde_json::from_str(&app_config).unwrap();
+        let public: [u8; 32] = base64::engine::general_purpose::STANDARD
+            .decode(app["publicKey"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        ed25519_dalek::VerifyingKey::from_bytes(&public)
+            .unwrap()
+            .verify(manifest.as_bytes(), &signature)
+            .unwrap();
+        let signed: Value = serde_json::from_str(&manifest).unwrap();
+        assert_eq!(signed["appId"], app["appId"]);
+        assert!(signed["createdAt"].as_u64().unwrap() > app["embeddedCreatedAt"].as_u64().unwrap());
     }
 
     #[test]
